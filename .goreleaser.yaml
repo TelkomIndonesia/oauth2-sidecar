@@ -1,0 +1,18 @@
+version: 2
+before:
+  hooks:
+    - go mod tidy
+builds:
+  - id: oauth2-sidecar
+    main: ./cmd/oauth2-sidecar
+    binary: oauth2-sidecar
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+archives:
+  - formats: [tar.gz]
+checksum:
+  name_template: checksums.txt
+release:
+  prerelease: auto
