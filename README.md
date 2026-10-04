@@ -28,9 +28,19 @@ oauth2-sidecar ... \
 
 The source is matched against the incoming client `Host` header (case-insensitively), and the destination becomes the upstream request's `Host` header. Use `--host-mapping '*=default.internal.example'` as a fallback. Multiple mappings can be supplied. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_MAPPING=api.local=api.internal.example,admin.local=admin.internal.example`. The configured upstream URL still determines the destination scheme and network address.
 
+Use the repeatable `--host-route local-host=scheme://remote-host[/path]` option to send requests for a specific local hostname to a different origin and base path:
+
+```sh
+oauth2-sidecar ... \
+  --upstream https://api.example.com \
+  --host-route app.local=https://app.internal.example:8443/base
+```
+
+A request with `Host: app.local` is forwarded to `https://app.internal.example:8443/base` plus the incoming request path (for example `/v1/foo` becomes `/base/v1/foo`). Both `http` and `https` targets are allowed. Routes take precedence over the `--upstream` destination, and a matching `--host-mapping` still overrides the upstream `Host` header. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_ROUTE=app.local=https://app.internal.example:8443/base`.
+
 ## Configuration
 
-Flags take precedence over environment variables. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, and `OAUTH2_SIDECAR_HOST_MAPPING`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version.
+Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_MAPPING`, `OAUTH2_SIDECAR_HOST_ROUTE`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
 
 ## Security
 
