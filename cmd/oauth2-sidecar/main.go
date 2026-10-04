@@ -50,7 +50,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	log.Info("connecting to issuer", "issuer", c.Issuer)
-	p, e := auth.NewProvider(ctx, c.Issuer)
+	p, e := auth.NewProvider(ctx, c.Issuer, c.IssuerIP)
 	if e != nil {
 		panic(e)
 	}

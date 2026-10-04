@@ -28,7 +28,7 @@ const (
 var ErrHelp = errors.New("help requested")
 
 type Config struct {
-	Issuer, ClientID, Scope, Upstream, Listen, RedirectPort, TokenStore string
+	Issuer, IssuerIP, ClientID, Scope, Upstream, Listen, RedirectPort, TokenStore string
 	Login                                                               bool
 	Verbose                                                             bool
 	HostMappings                                                        map[string]string
@@ -37,6 +37,7 @@ type Config struct {
 
 type cli struct {
 	Issuer       string              `name:"issuer" help:"OIDC issuer URL." placeholder:"URL"`
+	IssuerIP     string              `name:"issuer-ip" help:"Connect to this IPv4 or IPv6 address for the issuer hostname (sidecar only; preserves TLS verification)." placeholder:"IP"`
 	ClientID     string              `name:"client-id" help:"OAuth client ID registered with the issuer." placeholder:"ID"`
 	Scope        string              `name:"scope" default:"openid profile offline_access" help:"Space separated OAuth scopes."`
 	Upstream     string              `name:"upstream" help:"Upstream base URL to proxy authenticated requests to." placeholder:"URL"`
@@ -82,6 +83,7 @@ func Parse(args []string) (c Config, action Action, err error) {
 	}
 	c = Config{
 		Issuer:       cl.Issuer,
+		IssuerIP:     cl.IssuerIP,
 		ClientID:     cl.ClientID,
 		Scope:        cl.Scope,
 		Upstream:     cl.Upstream,
@@ -113,6 +115,11 @@ func Parse(args []string) (c Config, action Action, err error) {
 		u, e := url.Parse(s)
 		if e != nil || u.Scheme != "https" || u.Host == "" {
 			return c, ActionRun, fmt.Errorf("--%s must be an absolute HTTPS URL", n)
+		}
+	}
+	if c.IssuerIP != "" {
+		if net.ParseIP(c.IssuerIP) == nil {
+			return c, ActionRun, errors.New("--issuer-ip must be an IPv4 or IPv6 address")
 		}
 	}
 	if _, _, e := net.SplitHostPort(c.Listen); e != nil {

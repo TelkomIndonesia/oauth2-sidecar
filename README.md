@@ -38,9 +38,21 @@ oauth2-sidecar ... \
 
 A request with `Host: app.local` is forwarded to `https://app.internal.example:8443/base` plus the incoming request path (for example `/v1/foo` becomes `/base/v1/foo`). Both `http` and `https` targets are allowed. Routes take precedence over the `--upstream` destination, and a matching `--host-mapping` still overrides the upstream `Host` header. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_ROUTE=app.local=https://app.internal.example:8443/base`.
 
+## Issuer IP override
+
+Use `--issuer-ip` to connect to a specific IPv4 or IPv6 address while keeping the `--issuer` hostname for OIDC discovery, token, JWKS, TLS verification, and ID-token issuer checks:
+
+```sh
+oauth2-sidecar ... \
+  --issuer https://auth.example.com \
+  --issuer-ip 10.0.0.5
+```
+
+The sidecar dials `10.0.0.5` but still sends the `Host` header and TLS SNI for `auth.example.com`, so certificate verification is unchanged. This is useful when the issuer hostname does not resolve inside the sidecar network. Only the sidecar's issuer traffic is affected; the flag requires a DNS hostname in `--issuer`. The equivalent environment variable is `OAUTH2_SIDECAR_ISSUER_IP`.
+
 ## Configuration
 
-Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_MAPPING`, `OAUTH2_SIDECAR_HOST_ROUTE`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
+Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_MAPPING`, `OAUTH2_SIDECAR_HOST_ROUTE`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
 
 ## Security
 

@@ -21,14 +21,54 @@ import (
 type Provider struct {
 	OIDC     *oidc.Provider
 	Endpoint oauth2.Endpoint
+	client   *http.Client
 }
 
-func NewProvider(ctx context.Context, issuer string) (*Provider, error) {
+func issuerClient(issuer, ip string) (*http.Client, error) {
+	if net.ParseIP(ip) == nil {
+		return nil, errors.New("issuer IP must be an IPv4 or IPv6 address")
+	}
+	u, e := url.Parse(issuer)
+	if e != nil || u.Hostname() == "" {
+		return nil, errors.New("invalid issuer URL")
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dial := transport.DialContext
+	transport.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, e := net.SplitHostPort(address)
+		if e != nil {
+			return nil, e
+		}
+		if strings.EqualFold(host, u.Hostname()) {
+			address = net.JoinHostPort(ip, port)
+		}
+		return dial(ctx, network, address)
+	}
+	proxy := transport.Proxy
+	transport.Proxy = func(r *http.Request) (*url.URL, error) {
+		if strings.EqualFold(r.URL.Hostname(), u.Hostname()) || proxy == nil {
+			return nil, nil
+		}
+		return proxy(r)
+	}
+	return &http.Client{Transport: transport}, nil
+}
+
+func NewProvider(ctx context.Context, issuer, ip string) (*Provider, error) {
+	var client *http.Client
+	if ip != "" {
+		var e error
+		client, e = issuerClient(issuer, ip)
+		if e != nil {
+			return nil, e
+		}
+		ctx = oidc.ClientContext(ctx, client)
+	}
 	p, e := oidc.NewProvider(ctx, issuer)
 	if e != nil {
 		return nil, e
 	}
-	return &Provider{p, p.Endpoint()}, nil
+	return &Provider{OIDC: p, Endpoint: p.Endpoint(), client: client}, nil
 }
 
 type Authenticator struct {
@@ -41,6 +81,9 @@ func NewAuthenticator(p *Provider, c config.Config) *Authenticator {
 	return &Authenticator{p: p, c: c, open: openBrowser}
 }
 func (a *Authenticator) Refresh(ctx context.Context, t *oauth2.Token) (*oauth2.Token, error) {
+	if a.p.client != nil {
+		ctx = oidc.ClientContext(ctx, a.p.client)
+	}
 	return (&oauth2.Config{ClientID: a.c.ClientID, Endpoint: a.p.Endpoint, Scopes: strings.Fields(a.c.Scope)}).TokenSource(ctx, t).Token()
 }
 func (a *Authenticator) Login(ctx context.Context) (*oauth2.Token, error) {
@@ -101,12 +144,15 @@ func (a *Authenticator) Login(ctx context.Context) (*oauth2.Token, error) {
 	if cb.e != nil {
 		return nil, cb.e
 	}
+	if a.p.client != nil {
+		ctx = oidc.ClientContext(ctx, a.p.client)
+	}
 	t, e := cfg.Exchange(ctx, cb.code, oauth2.SetAuthURLParam("code_verifier", ver))
 	if e != nil {
 		return nil, e
 	}
 	if raw, ok := t.Extra("id_token").(string); ok && raw != "" {
-		if _, e = a.p.OIDC.Verifier(&oidc.Config{ClientID: a.c.ClientID}).Verify(ctx, raw); e != nil {
+		if _, e = a.p.OIDC.VerifierContext(ctx, &oidc.Config{ClientID: a.c.ClientID}).Verify(ctx, raw); e != nil {
 			return nil, fmt.Errorf("verify ID token: %w", e)
 		}
 	}
