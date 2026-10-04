@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,46 +14,123 @@ import (
 type TokenSource interface {
 	AccessToken(context.Context) (string, error)
 }
-type Proxy struct{ rp *httputil.ReverseProxy }
+type Proxy struct {
+	rp  *httputil.ReverseProxy
+	r   *resolver
+	log *slog.Logger
+}
 
-func New(raw string, src TokenSource, log *slog.Logger, mappings map[string]string, routes map[string]*url.URL) (*Proxy, error) {
-	u, e := url.Parse(raw)
-	if e != nil || u.Host == "" {
-		return nil, fmt.Errorf("invalid upstream URL")
+type resolver struct {
+	upstream    *url.URL
+	upstreamSet bool
+	mappings    map[string]string
+	routes      map[string]*url.URL
+}
+
+func newResolver(upstream *url.URL, mappings map[string]string, routes map[string]*url.URL) *resolver {
+	return &resolver{upstream: upstream, upstreamSet: upstream != nil, mappings: mappings, routes: routes}
+}
+
+func (r *resolver) resolve(host string) (*url.URL, string, bool) {
+	if u, ok := r.routes[host]; ok {
+		return u, "host-route", true
 	}
-	rp := &httputil.ReverseProxy{Transport: transport{src: src, base: http.DefaultTransport, log: log}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, e error) {
+	if r.upstreamSet {
+		return r.upstream, "upstream", true
+	}
+	if v, ok := r.mapping(host); ok {
+		return &url.URL{Scheme: "https", Host: v}, "host-mapping", true
+	}
+	return nil, "", false
+}
+
+func (r *resolver) mapping(host string) (string, bool) {
+	if v, ok := r.mappings[host]; ok {
+		return v, true
+	}
+	if v, ok := r.mappings["*"]; ok {
+		return v, true
+	}
+	return "", false
+}
+
+func (r *resolver) mappingSource(host string) string {
+	if _, ok := r.mappings[host]; ok {
+		return host
+	}
+	if _, ok := r.mappings["*"]; ok {
+		return "*"
+	}
+	return ""
+}
+
+func New(raw string, src TokenSource, log *slog.Logger, mappings map[string]string, routes map[string]*url.URL, insecure bool) (*Proxy, error) {
+	var upstream *url.URL
+	if raw != "" {
+		u, e := url.Parse(raw)
+		if e != nil || u.Host == "" {
+			return nil, fmt.Errorf("invalid upstream URL")
+		}
+		upstream = u
+	}
+	base := http.DefaultTransport
+	if insecure {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		if transport.TLSClientConfig == nil {
+			transport.TLSClientConfig = &tls.Config{}
+		} else {
+			transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		}
+		transport.TLSClientConfig.InsecureSkipVerify = true
+		base = transport
+	}
+	r := newResolver(upstream, mappings, routes)
+	rp := &httputil.ReverseProxy{Transport: transport{src: src, base: base, log: log}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, e error) {
 		log.Error("proxy request", "error", e)
 		http.Error(w, "upstream request failed", 502)
 	}}
 	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		host := strings.ToLower(pr.In.Host)
-		target := u
-		source := "upstream"
-		if ru, ok := routes[host]; ok {
-			target = ru
-			source = "host-route"
-		}
+		host := normalizeHost(pr.In.Host)
+		target, source, _ := r.resolve(host)
 		pr.SetURL(target)
 		pr.SetXForwarded()
-		mapping := ""
-		if h, ok := mappings[host]; ok {
+		if h, ok := r.mapping(host); ok {
 			pr.Out.Host = h
-			mapping = host
-		} else if h, ok := mappings["*"]; ok {
-			pr.Out.Host = h
-			mapping = "*"
 		}
 		log.Debug("proxy request",
 			"method", pr.In.Method,
 			"host", host,
 			"target", pr.Out.URL.String(),
 			"source", source,
-			"host-mapping", mapping,
+			"host-mapping", r.mappingSource(host),
 		)
 	}
-	return &Proxy{rp: rp}, nil
+	return &Proxy{rp: rp, r: r, log: log}, nil
 }
-func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) { p.rp.ServeHTTP(w, r) }
+
+func normalizeHost(h string) string {
+	h = strings.ToLower(h)
+	if strings.HasPrefix(h, "[") {
+		if i := strings.LastIndex(h, "]:"); i != -1 {
+			return h[:i+1]
+		}
+		return h
+	}
+	if i := strings.LastIndex(h, ":"); i != -1 {
+		return h[:i]
+	}
+	return h
+}
+
+func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	host := normalizeHost(req.Host)
+	if _, _, ok := p.r.resolve(host); !ok {
+		p.log.Error("no target for host", "host", host)
+		http.Error(w, "no upstream destination for host", http.StatusBadGateway)
+		return
+	}
+	p.rp.ServeHTTP(w, req)
+}
 
 type transport struct {
 	src  TokenSource

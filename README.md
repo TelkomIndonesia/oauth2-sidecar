@@ -28,6 +28,15 @@ oauth2-sidecar ... \
 
 The source is matched against the incoming client `Host` header (case-insensitively), and the destination becomes the upstream request's `Host` header. Use `--host-mapping '*=default.internal.example'` as a fallback. Multiple mappings can be supplied. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_MAPPING=api.local=api.internal.example,admin.local=admin.internal.example`. The configured upstream URL still determines the destination scheme and network address.
 
+`--upstream` is optional when `--host-route` or `--host-mapping` already defines where a request goes. Without `--upstream`, a matching mapping destination (a `host` or `host:port`, not a URL) becomes the HTTPS destination for that request, and requests whose host matches no route or mapping are rejected with `502 Bad Gateway`:
+
+```sh
+oauth2-sidecar ... \
+  --host-mapping api.local=api.internal.example:8443
+```
+
+In this mode mapping destinations are validated at startup as `host` or `host:port`, so malformed destinations fail fast. Host routes keep precedence over mappings; a mapping still overrides the outgoing `Host` header when it applies, and the wildcard `*` mapping acts as a fallback. Supplying `--upstream` restores the original behavior, where mappings only change the `Host` header.
+
 Use the repeatable `--host-route local-host=scheme://remote-host[/path]` option to send requests for a specific local hostname to a different origin and base path:
 
 ```sh
@@ -37,6 +46,18 @@ oauth2-sidecar ... \
 ```
 
 A request with `Host: app.local` is forwarded to `https://app.internal.example:8443/base` plus the incoming request path (for example `/v1/foo` becomes `/base/v1/foo`). Both `http` and `https` targets are allowed. Routes take precedence over the `--upstream` destination, and a matching `--host-mapping` still overrides the upstream `Host` header. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_ROUTE=app.local=https://app.internal.example:8443/base`.
+
+## TLS verification
+
+Proxied upstream requests verify TLS certificates by default. Use `--insecure-skip-verify` to skip certificate verification for proxied upstream requests only:
+
+```sh
+oauth2-sidecar ... \
+  --upstream https://10.0.0.20 \
+  --insecure-skip-verify
+```
+
+This flag affects only the upstream transport. OIDC discovery, token, JWKS, ID-token issuer checks, and the `--issuer-ip` client keep verifying the issuer certificate. The equivalent environment variable is `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`.
 
 ## Issuer IP override
 
@@ -48,11 +69,11 @@ oauth2-sidecar ... \
   --issuer-ip 10.0.0.5
 ```
 
-The sidecar dials `10.0.0.5` but still sends the `Host` header and TLS SNI for `auth.example.com`, so certificate verification is unchanged. This is useful when the issuer hostname does not resolve inside the sidecar network. Only the sidecar's issuer traffic is affected; the flag requires a DNS hostname in `--issuer`. The equivalent environment variable is `OAUTH2_SIDECAR_ISSUER_IP`.
+The sidecar dials `10.0.0.5` but still sends the `Host` header and TLS SNI for `auth.example.com`, so certificate verification is unchanged. This is useful when the issuer hostname does not resolve inside the sidecar network. Only the sidecar's issuer requests are affected: requests to the issuer hostname bypass any configured HTTP proxy, the embedded browser is unaffected because it uses the system resolver, and requests to any other host are unchanged. The equivalent environment variable is `OAUTH2_SIDECAR_ISSUER_IP`.
 
 ## Configuration
 
-Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_MAPPING`, `OAUTH2_SIDECAR_HOST_ROUTE`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
+Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_MAPPING`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
 
 ## Security
 

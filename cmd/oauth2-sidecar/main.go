@@ -60,7 +60,7 @@ func main() {
 	if _, e = m.Token(context.Background()); e != nil {
 		panic(e)
 	}
-	pr, e := proxy.New(c.Upstream, m, log, c.HostMappings, c.HostRoutes)
+	pr, e := proxy.New(c.Upstream, m, log, c.HostMappings, c.HostRoutes, c.InsecureSkipVerify)
 	if e != nil {
 		panic(e)
 	}
