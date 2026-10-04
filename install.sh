@@ -18,7 +18,7 @@ fi
 case "$version" in v*) ;; *) version="v$version" ;; esac
 [ -n "$version" ] || { echo "could not determine release version" >&2; exit 1; }
 version_no_v=$(printf '%s' "$version" | sed 's/^v//')
-asset="oauth2-sidecar_$version_no_v_$os_$arch.tar.gz"
+asset="oauth2-sidecar_${version_no_v}_${os}_${arch}.tar.gz"
 base="https://github.com/$repo/releases/download/$version"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
