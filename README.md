@@ -16,28 +16,9 @@ oauth2-sidecar \
 
 The first run opens a browser. The client can then call `http://127.0.0.1:8080/v1/foo`; the sidecar forwards it to the upstream with `Authorization: Bearer <access_token>`. The default listener is loopback. Register `http://127.0.0.1:<port>/callback` with the provider, or use `--redirect-port` for a stable callback port.
 
-## Host mapping
+## Host routes
 
-Use the repeatable `--host-mapping source-host=upstream-host` option when the upstream URL and the HTTP virtual host are different:
-
-```sh
-oauth2-sidecar ... \
-  --upstream https://10.0.0.20 \
-  --host-mapping api.local=api.internal.example
-```
-
-The source is matched against the incoming client `Host` header (case-insensitively), and the destination becomes the upstream request's `Host` header. Use `--host-mapping '*=default.internal.example'` as a fallback. Multiple mappings can be supplied. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_MAPPING=api.local=api.internal.example,admin.local=admin.internal.example`. The configured upstream URL still determines the destination scheme and network address.
-
-`--upstream` is optional when `--host-route` or `--host-mapping` already defines where a request goes. Without `--upstream`, a matching mapping destination (a `host` or `host:port`, not a URL) becomes the HTTPS destination for that request, and requests whose host matches no route or mapping are rejected with `502 Bad Gateway`:
-
-```sh
-oauth2-sidecar ... \
-  --host-mapping api.local=api.internal.example:8443
-```
-
-In this mode mapping destinations are validated at startup as `host` or `host:port`, so malformed destinations fail fast. Host routes keep precedence over mappings; a mapping still overrides the outgoing `Host` header when it applies, and the wildcard `*` mapping acts as a fallback. Supplying `--upstream` restores the original behavior, where mappings only change the `Host` header.
-
-Use the repeatable `--host-route local-host=scheme://remote-host[/path]` option to send requests for a specific local hostname to a different origin and base path:
+Use the repeatable `--host-route local-host=scheme://remote-host[/path][=remote-ip]` option to send requests for a specific local hostname to a different origin and base path:
 
 ```sh
 oauth2-sidecar ... \
@@ -45,7 +26,20 @@ oauth2-sidecar ... \
   --host-route app.local=https://app.internal.example:8443/base
 ```
 
-A request with `Host: app.local` is forwarded to `https://app.internal.example:8443/base` plus the incoming request path (for example `/v1/foo` becomes `/base/v1/foo`). Both `http` and `https` targets are allowed. Routes take precedence over the `--upstream` destination, and a matching `--host-mapping` still overrides the upstream `Host` header. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_ROUTE=app.local=https://app.internal.example:8443/base`.
+A request with `Host: app.local` is forwarded to `https://app.internal.example:8443/base` plus the incoming request path (for example `/v1/foo` becomes `/base/v1/foo`). Both `http` and `https` targets are allowed. The source is matched against the incoming client `Host` header (case-insensitively, with the port stripped). Routes take precedence over the `--upstream` destination. Multiple routes can be supplied. The equivalent environment variable is comma-separated, for example `OAUTH2_SIDECAR_HOST_ROUTE=app.local=https://app.internal.example:8443/base,admin.local=https://admin.internal.example`.
+
+`--upstream` is optional when `--host-route` already defines where a request goes. Without `--upstream`, only routed hosts are proxied and requests whose host matches no route are rejected with `502 Bad Gateway`.
+
+### Upstream IP override
+
+Append `=remote-ip` to a route to connect to a specific IPv4 or IPv6 address while keeping the URL hostname for the `Host` header, TLS SNI, and certificate verification — the upstream equivalent of `--issuer-ip`:
+
+```sh
+oauth2-sidecar ... \
+  --host-route app.local=https://app.internal.example:8443=10.0.0.30
+```
+
+The sidecar dials `10.0.0.30:8443` but still sends `Host: app.internal.example:8443` and TLS SNI `app.internal.example`, so certificate verification is unchanged. Requests whose target host has an IP override bypass any configured HTTP proxy. The remote IP must be a bare IPv4 or IPv6 address (no port); malformed values fail at startup.
 
 ## TLS verification
 
@@ -73,7 +67,7 @@ The sidecar dials `10.0.0.5` but still sends the `Host` header and TLS SNI for `
 
 ## Configuration
 
-Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_MAPPING`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
+Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
 
 ## Security
 

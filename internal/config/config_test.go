@@ -13,8 +13,8 @@ func TestParseHostRoute(t *testing.T) {
 	if action != ActionRun {
 		t.Fatalf("action %d", action)
 	}
-	u := c.HostRoutes["app.local"]
-	if u == nil || u.Scheme != "https" || u.Host != "other.example:8443" || u.Path != "/base" {
+	rt := c.HostRoutes["app.local"]
+	if rt.Target == nil || rt.Target.Scheme != "https" || rt.Target.Host != "other.example:8443" || rt.Target.Path != "/base" || rt.IP != "" {
 		t.Fatalf("bad route: %v", c.HostRoutes)
 	}
 }
@@ -25,7 +25,7 @@ func TestParseHostRouteFromEnv(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if c.HostRoutes["a.local"].Host != "a.internal" || c.HostRoutes["b.local"].Path != "/b" {
+	if c.HostRoutes["a.local"].Target.Host != "a.internal" || c.HostRoutes["b.local"].Target.Path != "/b" {
 		t.Fatalf("bad routes: %v", c.HostRoutes)
 	}
 }
@@ -33,6 +33,30 @@ func TestParseHostRouteFromEnv(t *testing.T) {
 func TestParseHostRouteRejectsInvalidTarget(t *testing.T) {
 	base := []string{"--issuer", "https://issuer.example", "--client-id", "c", "--upstream", "https://upstream.example"}
 	for _, v := range []string{"app.local=other.internal", "app.local=ftp://other.internal", "=https://other.internal", "app.local="} {
+		if _, _, e := Parse(append(append([]string{}, base...), "--host-route", v)); e == nil {
+			t.Fatalf("expected error for %q", v)
+		}
+	}
+}
+
+func TestParseHostRouteIPOverride(t *testing.T) {
+	base := []string{"--issuer", "https://issuer.example", "--client-id", "c", "--upstream", "https://upstream.example"}
+	c, _, e := Parse(append(append([]string{}, base...), "--host-route", "app.local=https://other.example:8443/base=10.0.0.5"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	rt := c.HostRoutes["app.local"]
+	if rt.Target == nil || rt.Target.Host != "other.example:8443" || rt.Target.Path != "/base" || rt.IP != "10.0.0.5" {
+		t.Fatalf("bad route with ip: %+v", rt)
+	}
+	c, _, e = Parse(append(append([]string{}, base...), "--host-route", "app.local=https://other.example=2001:db8::1"))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if rt := c.HostRoutes["app.local"]; rt.Target.Host != "other.example" || rt.IP != "2001:db8::1" {
+		t.Fatalf("bad ipv6 override: %+v", rt)
+	}
+	for _, v := range []string{"app.local=https://other.example=not-an-ip", "app.local=https://other.example=", "app.local=https://other.example=192.0.2.1:443"} {
 		if _, _, e := Parse(append(append([]string{}, base...), "--host-route", v)); e == nil {
 			t.Fatalf("expected error for %q", v)
 		}
@@ -69,17 +93,7 @@ func TestParseHelp(t *testing.T) {
 
 func TestParseRequiresDestination(t *testing.T) {
 	if _, _, e := Parse([]string{"--issuer", "https://issuer.example", "--client-id", "c"}); e == nil {
-		t.Fatal("expected error when no upstream, host-route, or host-mapping is given")
-	}
-}
-
-func TestParseMappingOnly(t *testing.T) {
-	c, action, e := Parse([]string{"--issuer", "https://issuer.example", "--client-id", "c", "--host-mapping", "app.local=api.internal:8443"})
-	if e != nil {
-		t.Fatal(e)
-	}
-	if action != ActionRun || c.Upstream != "" || c.HostMappings["app.local"] != "api.internal:8443" {
-		t.Fatalf("bad mapping-only config: %+v", c)
+		t.Fatal("expected error when no upstream or host-route is given")
 	}
 }
 
@@ -88,38 +102,8 @@ func TestParseRouteOnly(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if action != ActionRun || c.Upstream != "" || c.HostRoutes["app.local"].Host != "other.example:8443" {
+	if action != ActionRun || c.Upstream != "" || c.HostRoutes["app.local"].Target.Host != "other.example:8443" {
 		t.Fatalf("bad route-only config: %+v", c)
-	}
-}
-
-func TestParseMappingDestinationValidation(t *testing.T) {
-	base := []string{"--issuer", "https://issuer.example", "--client-id", "c"}
-	for _, v := range []string{"app.local=https://other.internal", "app.local=other.internal/path", "app.local=user@other.internal", "app.local=bad host", "app.local=:8443"} {
-		if _, _, e := Parse(append(append([]string{}, base...), "--host-mapping", v)); e == nil {
-			t.Fatalf("expected error for mapping-only destination %q", v)
-		}
-	}
-	for _, v := range []string{"app.local=api.internal", "app.local=api.internal:8443", "app.local=[2001:db8::1]:8443"} {
-		if _, _, e := Parse(append(append([]string{}, base...), "--host-mapping", v)); e != nil {
-			t.Fatalf("unexpected error for mapping-only destination %q: %v", v, e)
-		}
-	}
-	withUpstream := append(append([]string{}, base...), "--upstream", "https://upstream.example", "--host-mapping", "app.local=https://other.internal")
-	if _, _, e := Parse(withUpstream); e != nil {
-		t.Fatalf("mapping destination with upstream should not be validated: %v", e)
-	}
-}
-
-func TestParseMixedRouteMappingValidatesDestinations(t *testing.T) {
-	base := []string{"--issuer", "https://issuer.example", "--client-id", "c"}
-	bad := append(append([]string{}, base...), "--host-route", "app.local=https://other.example", "--host-mapping", "fallback.local=https://bad.internal")
-	if _, _, e := Parse(bad); e == nil {
-		t.Fatal("expected mapping destination validation to apply with routes and no upstream")
-	}
-	good := append(append([]string{}, base...), "--host-route", "app.local=https://other.example", "--host-mapping", "fallback.local=bad.internal:8443")
-	if _, _, e := Parse(good); e != nil {
-		t.Fatalf("valid mixed route/mapping: %v", e)
 	}
 }
 

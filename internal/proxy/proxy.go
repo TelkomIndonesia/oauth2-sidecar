@@ -5,10 +5,13 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"strings"
+
+	"github.com/TelkomIndonesia/oauth2-sidecar/internal/config"
 )
 
 type TokenSource interface {
@@ -23,48 +26,24 @@ type Proxy struct {
 type resolver struct {
 	upstream    *url.URL
 	upstreamSet bool
-	mappings    map[string]string
-	routes      map[string]*url.URL
+	routes      map[string]config.HostRoute
 }
 
-func newResolver(upstream *url.URL, mappings map[string]string, routes map[string]*url.URL) *resolver {
-	return &resolver{upstream: upstream, upstreamSet: upstream != nil, mappings: mappings, routes: routes}
+func newResolver(upstream *url.URL, routes map[string]config.HostRoute) *resolver {
+	return &resolver{upstream: upstream, upstreamSet: upstream != nil, routes: routes}
 }
 
 func (r *resolver) resolve(host string) (*url.URL, string, bool) {
-	if u, ok := r.routes[host]; ok {
-		return u, "host-route", true
+	if rt, ok := r.routes[host]; ok {
+		return rt.Target, "host-route", true
 	}
 	if r.upstreamSet {
 		return r.upstream, "upstream", true
 	}
-	if v, ok := r.mapping(host); ok {
-		return &url.URL{Scheme: "https", Host: v}, "host-mapping", true
-	}
 	return nil, "", false
 }
 
-func (r *resolver) mapping(host string) (string, bool) {
-	if v, ok := r.mappings[host]; ok {
-		return v, true
-	}
-	if v, ok := r.mappings["*"]; ok {
-		return v, true
-	}
-	return "", false
-}
-
-func (r *resolver) mappingSource(host string) string {
-	if _, ok := r.mappings[host]; ok {
-		return host
-	}
-	if _, ok := r.mappings["*"]; ok {
-		return "*"
-	}
-	return ""
-}
-
-func New(raw string, src TokenSource, log *slog.Logger, mappings map[string]string, routes map[string]*url.URL, insecure bool) (*Proxy, error) {
+func New(raw string, src TokenSource, log *slog.Logger, routes map[string]config.HostRoute, insecure bool) (*Proxy, error) {
 	var upstream *url.URL
 	if raw != "" {
 		u, e := url.Parse(raw)
@@ -84,7 +63,12 @@ func New(raw string, src TokenSource, log *slog.Logger, mappings map[string]stri
 		transport.TLSClientConfig.InsecureSkipVerify = true
 		base = transport
 	}
-	r := newResolver(upstream, mappings, routes)
+	if overrides := dialOverrides(routes); len(overrides) > 0 {
+		transport := base.(*http.Transport).Clone()
+		applyDialOverrides(transport, overrides)
+		base = transport
+	}
+	r := newResolver(upstream, routes)
 	rp := &httputil.ReverseProxy{Transport: transport{src: src, base: base, log: log}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, e error) {
 		log.Error("proxy request", "error", e)
 		http.Error(w, "upstream request failed", 502)
@@ -94,18 +78,45 @@ func New(raw string, src TokenSource, log *slog.Logger, mappings map[string]stri
 		target, source, _ := r.resolve(host)
 		pr.SetURL(target)
 		pr.SetXForwarded()
-		if h, ok := r.mapping(host); ok {
-			pr.Out.Host = h
-		}
 		log.Debug("proxy request",
 			"method", pr.In.Method,
 			"host", host,
 			"target", pr.Out.URL.String(),
 			"source", source,
-			"host-mapping", r.mappingSource(host),
 		)
 	}
 	return &Proxy{rp: rp, r: r, log: log}, nil
+}
+
+func dialOverrides(routes map[string]config.HostRoute) map[string]string {
+	out := map[string]string{}
+	for _, rt := range routes {
+		if rt.IP != "" && rt.Target != nil && rt.Target.Hostname() != "" {
+			out[strings.ToLower(rt.Target.Hostname())] = rt.IP
+		}
+	}
+	return out
+}
+
+func applyDialOverrides(t *http.Transport, overrides map[string]string) {
+	dial := t.DialContext
+	t.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, e := net.SplitHostPort(address)
+		if e != nil {
+			return nil, e
+		}
+		if ip, ok := overrides[strings.ToLower(host)]; ok {
+			address = net.JoinHostPort(ip, port)
+		}
+		return dial(ctx, network, address)
+	}
+	proxy := t.Proxy
+	t.Proxy = func(r *http.Request) (*url.URL, error) {
+		if _, ok := overrides[strings.ToLower(r.URL.Hostname())]; ok || proxy == nil {
+			return nil, nil
+		}
+		return proxy(r)
+	}
 }
 
 func normalizeHost(h string) string {
