@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kong"
+	"gopkg.in/yaml.v3"
 )
 
 type Action int
@@ -41,6 +44,7 @@ type HostRoute struct {
 }
 
 type cli struct {
+	Config       configSource      `name:"config" env:"-" help:"Load defaults from a YAML or JSON file, - for stdin, or an http(s):// URL. Keys are flag names; flags and environment variables take precedence." placeholder:"FILE|-|URL"`
 	Issuer       string            `name:"issuer" help:"OIDC issuer URL." placeholder:"URL"`
 	IssuerIP     string            `name:"issuer-ip" help:"Connect to this IPv4 or IPv6 address for the issuer hostname (sidecar only; preserves TLS verification)." placeholder:"IP"`
 	ClientID     string            `name:"client-id" help:"OAuth client ID registered with the issuer." placeholder:"ID"`
@@ -58,9 +62,90 @@ type cli struct {
 }
 
 var (
+	stdin  io.Reader = os.Stdin
 	stdout io.Writer = os.Stdout
 	stderr io.Writer = os.Stderr
+
+	configClient = &http.Client{Timeout: 10 * time.Second}
 )
+
+// configSource fills flags missing from the command line, like kong.ConfigFlag.
+type configSource string
+
+func (configSource) BeforeResolve(ctx *kong.Context, trace *kong.Path) error {
+	src := string(ctx.FlagValue(trace.Flag).(configSource))
+	values, e := loadConfig(src)
+	if e != nil {
+		return fmt.Errorf("--config %s: %w", src, e)
+	}
+	// Flags without an env var are actions like --logout, not settings.
+	settable := map[string]bool{}
+	for _, f := range ctx.Model.Flags {
+		settable[f.Name] = len(f.Envs) > 0
+	}
+	for k := range values {
+		if !settable[k] {
+			return fmt.Errorf("--config %s: unsupported key %q", src, k)
+		}
+	}
+	ctx.AddResolver(kong.ResolverFunc(func(_ *kong.Context, _ *kong.Path, f *kong.Flag) (any, error) {
+		// Kong lets resolvers override env vars.
+		for _, env := range f.Envs {
+			if _, ok := os.LookupEnv(env); ok {
+				return nil, nil
+			}
+		}
+		v := values[f.Name]
+		switch v.(type) {
+		case nil, map[string]any, []any:
+			return v, nil
+		}
+		// YAML reads 8250 as an int, but kong wants flag text.
+		return fmt.Sprint(v), nil
+	}))
+	return nil
+}
+
+func loadConfig(src string) (map[string]any, error) {
+	r, e := openConfig(src)
+	if e != nil {
+		return nil, e
+	}
+	defer r.Close()
+	d := yaml.NewDecoder(r)
+	var values map[string]any
+	if e = d.Decode(&values); e != nil && !errors.Is(e, io.EOF) {
+		return nil, e
+	}
+	if !errors.Is(d.Decode(new(any)), io.EOF) {
+		return nil, errors.New("want one YAML document")
+	}
+	return values, nil
+}
+
+func openConfig(src string) (io.ReadCloser, error) {
+	if src == "-" {
+		return io.NopCloser(stdin), nil
+	}
+	u, e := url.Parse(src)
+	if e != nil || u.Scheme != "http" && u.Scheme != "https" {
+		return os.Open(src)
+	}
+	resp, e := configClient.Get(src)
+	if e != nil {
+		return nil, e
+	}
+	switch {
+	case u.Scheme == "https" && resp.Request.URL.Scheme != "https":
+		e = errors.New("https config redirected to http")
+	case resp.StatusCode != http.StatusOK:
+		e = fmt.Errorf("unexpected status %s", resp.Status)
+	default:
+		return resp.Body, nil
+	}
+	resp.Body.Close()
+	return nil, e
+}
 
 func Parse(args []string) (c Config, action Action, err error) {
 	defer func() {

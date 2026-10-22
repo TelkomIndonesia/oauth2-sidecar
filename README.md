@@ -67,7 +67,23 @@ The sidecar dials `10.0.0.5` but still sends the `Host` header and TLS SNI for `
 
 ## Configuration
 
-Flags take precedence over environment variables. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
+Use `--config` to load settings from a YAML or JSON file, from stdin (`-`), or from an `http://` or `https://` URL, so a team can share one routing file:
+
+```yaml
+issuer: https://auth.example.com
+client-id: my-client
+host-route:
+  app.local: https://app.internal.example:8443/base
+  admin.local: https://admin.internal.example=10.0.0.30
+```
+
+```sh
+oauth2-sidecar --config https://config.example.com/oauth2-sidecar.yaml --listen 127.0.0.1:9090
+```
+
+Keys are flag names. Unknown keys are rejected, and `login`, `logout`, and `version` cannot be set from a file. The config decides where tokens are sent, so serve plain `http://` configs only on a network you trust. An `https://` config that redirects to `http://` is rejected. A `--host-route` flag replaces the file's routes rather than adding to them.
+
+Flags take precedence over environment variables, and both take precedence over the config file. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
 
 ## Security
 
