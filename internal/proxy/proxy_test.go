@@ -30,7 +30,7 @@ func TestProxyReplacesAuthorizationAndForwardsPath(t *testing.T) {
 	got := make(chan *http.Request, 1)
 	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got <- r.Clone(r.Context()); w.WriteHeader(204) }))
 	defer u.Close()
-	p, e := New(u.URL, testToken("new"), slog.Default(), nil, false)
+	p, e := New(u.URL, testToken("new"), slog.Default(), nil, false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -56,7 +56,7 @@ func TestProxyHostRouteTargetsMappedOrigin(t *testing.T) {
 	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got <- r.Clone(r.Context()); w.WriteHeader(204) }))
 	defer other.Close()
 	routes := route(t, other.URL+"/base", "")
-	p, e := New(def.URL, testToken("new"), slog.Default(), routes, false)
+	p, e := New(def.URL, testToken("new"), slog.Default(), routes, false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -83,7 +83,7 @@ func TestProxyRouteOnlyWithoutUpstream(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got <- r.Clone(r.Context()); w.WriteHeader(204) }))
 	defer up.Close()
 	routes := route(t, up.URL+"/base", "")
-	p, e := New("", testToken("new"), slog.Default(), routes, false)
+	p, e := New("", testToken("new"), slog.Default(), routes, false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -110,7 +110,7 @@ func TestProxyHostPortStrippedForMatching(t *testing.T) {
 		t.Fatal(e)
 	}
 	routes["oss.localhost"] = config.HostRoute{Target: target}
-	p, e := New("", testToken("new"), slog.Default(), routes, false)
+	p, e := New("", testToken("new"), slog.Default(), routes, false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -127,7 +127,7 @@ func TestProxyHostPortStrippedForMatching(t *testing.T) {
 }
 
 func TestProxyUnmatchedHostRejected(t *testing.T) {
-	p, e := New("", testToken("new"), slog.Default(), route(t, "https://api.internal", ""), false)
+	p, e := New("", testToken("new"), slog.Default(), route(t, "https://api.internal", ""), false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -142,7 +142,7 @@ func TestProxyUnmatchedHostRejected(t *testing.T) {
 
 func TestProxyRoutingRejectsInvalidUpstream(t *testing.T) {
 	for _, raw := range []string{"not-a-url", "https://", "://bad", "relative/path"} {
-		if _, e := New(raw, testToken("new"), slog.Default(), nil, false); e == nil {
+		if _, e := New(raw, testToken("new"), slog.Default(), nil, false, "Authorization"); e == nil {
 			t.Fatalf("expected invalid upstream error for %q", raw)
 		}
 	}
@@ -157,7 +157,7 @@ func TestProxyRouteIPOverrideDialsAddress(t *testing.T) {
 		t.Fatal(e)
 	}
 	routes := route(t, "http://upstream.example:"+port, "127.0.0.1")
-	p, e := New("", testToken("new"), slog.Default(), routes, false)
+	p, e := New("", testToken("new"), slog.Default(), routes, false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -185,7 +185,7 @@ func TestProxyRouteIPOverridePreservesTLSVerification(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "http://local/v1/foo", nil)
 	r.Host = "app.local"
 
-	strict, e := New("", testToken("new"), slog.Default(), routes, false)
+	strict, e := New("", testToken("new"), slog.Default(), routes, false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -195,7 +195,7 @@ func TestProxyRouteIPOverridePreservesTLSVerification(t *testing.T) {
 		t.Fatalf("expected verification to stay active over IP override, got status %d", w.Code)
 	}
 
-	relaxed, e := New("", testToken("new"), slog.Default(), routes, true)
+	relaxed, e := New("", testToken("new"), slog.Default(), routes, true, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -217,7 +217,7 @@ func TestProxyInsecurePreservesClonedTLSConfig(t *testing.T) {
 	http.DefaultTransport = clone
 	t.Cleanup(func() { http.DefaultTransport = original; clone.CloseIdleConnections() })
 
-	p, e := New("", testToken("new"), slog.Default(), nil, true)
+	p, e := New("", testToken("new"), slog.Default(), nil, true, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -238,7 +238,7 @@ func TestProxyTLSVerification(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "http://local/v1/foo", nil)
 	r.Host = "app.local"
 
-	strict, e := New("", testToken("new"), slog.Default(), routes, false)
+	strict, e := New("", testToken("new"), slog.Default(), routes, false, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -248,7 +248,7 @@ func TestProxyTLSVerification(t *testing.T) {
 		t.Fatalf("expected TLS verification failure, got status %d", w.Code)
 	}
 
-	relaxed, e := New("", testToken("new"), slog.Default(), routes, true)
+	relaxed, e := New("", testToken("new"), slog.Default(), routes, true, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -261,5 +261,23 @@ func TestProxyTLSVerification(t *testing.T) {
 	case <-got:
 	default:
 		t.Fatal("upstream did not receive requested after skipping verification")
+	}
+}
+
+func TestProxyTokenHeaderKeepsAuthorization(t *testing.T) {
+	got := make(chan *http.Request, 1)
+	u := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got <- r.Clone(r.Context()); w.WriteHeader(204) }))
+	defer u.Close()
+	p, e := New("", testToken("new"), slog.Default(), route(t, u.URL, ""), false, "X-Dex-Token")
+	if e != nil {
+		t.Fatal(e)
+	}
+	r := httptest.NewRequest(http.MethodGet, "http://app.local/", nil)
+	r.Header.Set("Authorization", "Bearer app")
+	r.Header.Set("X-Dex-Token", "Bearer forged")
+	p.ServeHTTP(httptest.NewRecorder(), r)
+	x := <-got
+	if x.Header.Get("Authorization") != "Bearer app" || x.Header.Get("X-Dex-Token") != "Bearer new" {
+		t.Fatalf("Authorization=%q X-Dex-Token=%q", x.Header.Get("Authorization"), x.Header.Get("X-Dex-Token"))
 	}
 }

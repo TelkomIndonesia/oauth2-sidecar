@@ -43,7 +43,7 @@ func (r *resolver) resolve(host string) (*url.URL, string, bool) {
 	return nil, "", false
 }
 
-func New(raw string, src TokenSource, log *slog.Logger, routes map[string]config.HostRoute, insecure bool) (*Proxy, error) {
+func New(raw string, src TokenSource, log *slog.Logger, routes map[string]config.HostRoute, insecure bool, header string) (*Proxy, error) {
 	var upstream *url.URL
 	if raw != "" {
 		u, e := url.Parse(raw)
@@ -69,7 +69,7 @@ func New(raw string, src TokenSource, log *slog.Logger, routes map[string]config
 		base = transport
 	}
 	r := newResolver(upstream, routes)
-	rp := &httputil.ReverseProxy{Transport: transport{src: src, base: base, log: log}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, e error) {
+	rp := &httputil.ReverseProxy{Transport: transport{src: src, base: base, log: log, header: header}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, e error) {
 		log.Error("proxy request", "error", e)
 		http.Error(w, "upstream request failed", 502)
 	}}
@@ -144,9 +144,10 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 }
 
 type transport struct {
-	src  TokenSource
-	base http.RoundTripper
-	log  *slog.Logger
+	src    TokenSource
+	base   http.RoundTripper
+	log    *slog.Logger
+	header string
 }
 
 func (t transport) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -157,6 +158,6 @@ func (t transport) RoundTrip(r *http.Request) (*http.Response, error) {
 	t.log.Debug("injecting access token", "method", r.Method, "url", r.URL.String(), "bytes", len(a))
 	q := r.Clone(r.Context())
 	q.Header = r.Header.Clone()
-	q.Header.Set("Authorization", "Bearer "+a)
+	q.Header.Set(t.header, "Bearer "+a)
 	return t.base.RoundTrip(q)
 }

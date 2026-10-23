@@ -127,6 +127,21 @@ func TestParseInsecureSkipVerify(t *testing.T) {
 	}
 }
 
+func TestParseTokenHeader(t *testing.T) {
+	base := []string{"--issuer", "https://issuer.example", "--client-id", "c", "--upstream", "https://upstream.example"}
+	if c, _, e := Parse(base); e != nil || c.TokenHeader != "Authorization" {
+		t.Fatalf("default token header: %q %v", c.TokenHeader, e)
+	}
+	if c, _, e := Parse(append(append([]string{}, base...), "--token-header", "X-Dex-Token")); e != nil || c.TokenHeader != "X-Dex-Token" {
+		t.Fatalf("flag token header: %q %v", c.TokenHeader, e)
+	}
+	for _, h := range []string{"", "X Dex", "X-Dex:", "X-Dé"} {
+		if _, _, e := Parse(append(append([]string{}, base...), "--token-header", h)); e == nil || !strings.Contains(e.Error(), "--token-header") {
+			t.Fatalf("%q: want --token-header error, got %v", h, e)
+		}
+	}
+}
+
 func writeConfig(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "c.yaml")

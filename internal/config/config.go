@@ -32,6 +32,7 @@ var ErrHelp = errors.New("help requested")
 
 type Config struct {
 	Issuer, IssuerIP, ClientID, Scope, Upstream, Listen, RedirectPort, TokenStore string
+	TokenHeader                                                                   string
 	Login                                                                         bool
 	Verbose                                                                       bool
 	InsecureSkipVerify                                                            bool
@@ -53,6 +54,7 @@ type cli struct {
 	Listen       string            `name:"listen" default:"127.0.0.1:8080" help:"Address to listen on." placeholder:"HOST:PORT"`
 	RedirectPort string            `name:"redirect-port" help:"Fixed local port for the OAuth2 loopback redirect." placeholder:"PORT"`
 	TokenStore   string            `name:"token-store" help:"Path to the token cache file." placeholder:"PATH"`
+	TokenHeader  string            `name:"token-header" default:"Authorization" help:"Request header that carries the access token as Bearer <token>; other values leave Authorization untouched." placeholder:"NAME"`
 	HostRoutes   map[string]string `name:"host-route" mapsep:"," help:"Route an incoming Host to scheme://remote-host[/path][=remote-ip] (repeatable); remote-ip dials that address while preserving TLS verification for the URL hostname." placeholder:"LOCAL=URL[=IP]"`
 	Login        bool              `name:"login" env:"-" help:"Force authentication, then serve."`
 	SkipVerify   bool              `name:"insecure-skip-verify" help:"Skip TLS certificate verification for proxied upstream requests only; issuer verification is unchanged."`
@@ -68,6 +70,9 @@ var (
 
 	configClient = &http.Client{Timeout: 10 * time.Second}
 )
+
+// headerChars are the token characters allowed in a header name (RFC 9110).
+const headerChars = "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 // configSource fills flags missing from the command line, like kong.ConfigFlag.
 type configSource string
@@ -180,6 +185,7 @@ func Parse(args []string) (c Config, action Action, err error) {
 		Listen:             cl.Listen,
 		RedirectPort:       cl.RedirectPort,
 		TokenStore:         cl.TokenStore,
+		TokenHeader:        cl.TokenHeader,
 		Login:              cl.Login,
 		Verbose:            cl.Verbose,
 		InsecureSkipVerify: cl.SkipVerify,
@@ -224,6 +230,9 @@ func Parse(args []string) (c Config, action Action, err error) {
 		if _, e := strconv.Atoi(c.RedirectPort); e != nil {
 			return c, ActionRun, errors.New("--redirect-port must be numeric")
 		}
+	}
+	if c.TokenHeader == "" || strings.Trim(c.TokenHeader, headerChars) != "" {
+		return c, ActionRun, errors.New("--token-header must be a valid header name")
 	}
 	if c.TokenStore == "" {
 		d, e := os.UserConfigDir()
