@@ -54,7 +54,7 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
-	a := auth.NewAuthenticator(p, c)
+	a := auth.NewAuthenticator(p, c, log)
 	m := token.NewManager(s, a)
 	log.Info("acquiring token", "store", c.TokenStore)
 	if _, e = m.Token(context.Background()); e != nil {

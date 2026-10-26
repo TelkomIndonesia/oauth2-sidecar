@@ -14,7 +14,7 @@ oauth2-sidecar \
   --listen 127.0.0.1:8080
 ```
 
-The first run opens a browser. The client can then call `http://127.0.0.1:8080/v1/foo`; the sidecar forwards it to the upstream with `Authorization: Bearer <access_token>`. The default listener is loopback. Register `http://127.0.0.1:<port>/callback` with the provider, or use `--redirect-port` for a stable callback port.
+On Windows, install from PowerShell with `irm https://raw.githubusercontent.com/TelkomIndonesia/oauth2-sidecar/main/install.ps1 | iex`; it puts `oauth2-sidecar.exe` in `%LOCALAPPDATA%\Programs\oauth2-sidecar` and adds that folder to the user `Path`. The first run opens a browser and also logs the login URL, so it can be opened by hand where no browser starts (for example WSL without `wslu`, or over SSH). The client can then call `http://127.0.0.1:8080/v1/foo`; the sidecar forwards it to the upstream with `Authorization: Bearer <access_token>`. The default listener is loopback. Register `http://127.0.0.1:<port>/callback` with the provider, or use `--redirect-port` for a stable callback port.
 
 ## Host routes
 
@@ -87,7 +87,7 @@ Flags take precedence over environment variables, and both take precedence over 
 
 ## Security
 
-OIDC discovery and ID-token verification use `github.com/coreos/go-oidc/v3/oidc`; OAuth flows and refresh use `golang.org/x/oauth2`. State and PKCE values are cryptographically random. The token header (`Authorization` unless `--token-header` says otherwise) is always overwritten, so a client cannot forward its own value. With a different `--token-header`, the client's `Authorization` passes through, which lets an app send its own credentials next to the sidecar token. Tokens are written with restrictive permissions to the configured user-state path. Keep the proxy on loopback unless the network is deliberately secured, and never commit token files.
+OIDC discovery and ID-token verification use `github.com/coreos/go-oidc/v3/oidc`; OAuth flows and refresh use `golang.org/x/oauth2`. State and PKCE values are cryptographically random. The token header (`Authorization` unless `--token-header` says otherwise) is always overwritten, so a client cannot forward its own value. With a different `--token-header`, the client's `Authorization` passes through, which lets an app send its own credentials next to the sidecar token. Tokens are written with restrictive permissions to the configured user-state path; on Windows the file mode is not enforced, so protection comes from the user profile ACL of `%AppData%`. Keep the proxy on loopback unless the network is deliberately secured, and never commit token files.
 
 ## Development
 
@@ -99,7 +99,7 @@ go vet ./...
 go build ./cmd/oauth2-sidecar
 ```
 
-Provider setup is standard for Keycloak, Authentik, Dex, Microsoft Entra ID, and generic OIDC: create a public/native Authorization Code + PKCE client, register the localhost callback, and request `offline_access` when refresh tokens are required. Verify provider-specific scopes and callback policies with the provider documentation. Releases target Linux and macOS amd64/arm64 and publish SHA256 checksums.
+Provider setup is standard for Keycloak, Authentik, Dex, Microsoft Entra ID, and generic OIDC: create a public/native Authorization Code + PKCE client, register the localhost callback, and request `offline_access` when refresh tokens are required. Verify provider-specific scopes and callback policies with the provider documentation. Releases target Linux, macOS, and Windows on amd64/arm64 and publish SHA256 checksums.
 
 ## License
 

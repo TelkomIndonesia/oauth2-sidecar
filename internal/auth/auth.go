@@ -11,6 +11,7 @@ import (
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/config"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -74,11 +75,12 @@ func NewProvider(ctx context.Context, issuer, ip string) (*Provider, error) {
 type Authenticator struct {
 	p    *Provider
 	c    config.Config
+	log  *slog.Logger
 	open func(string) error
 }
 
-func NewAuthenticator(p *Provider, c config.Config) *Authenticator {
-	return &Authenticator{p: p, c: c, open: openBrowser}
+func NewAuthenticator(p *Provider, c config.Config, log *slog.Logger) *Authenticator {
+	return &Authenticator{p: p, c: c, log: log, open: browser.OpenURL}
 }
 func (a *Authenticator) Refresh(ctx context.Context, t *oauth2.Token) (*oauth2.Token, error) {
 	if a.p.client != nil {
@@ -130,8 +132,13 @@ func (a *Authenticator) Login(ctx context.Context) (*oauth2.Token, error) {
 	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())
 	cfg := &oauth2.Config{ClientID: a.c.ClientID, Endpoint: a.p.Endpoint, RedirectURL: redirect, Scopes: strings.Fields(a.c.Scope)}
-	if e = a.open(cfg.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("code_challenge", challenge), oauth2.SetAuthURLParam("code_challenge_method", "S256"))); e != nil {
-		return nil, e
+	authURL := cfg.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("code_challenge", challenge), oauth2.SetAuthURLParam("code_challenge_method", "S256"))
+	if u, e := url.Parse(authURL); e != nil || u.Scheme != "https" {
+		return nil, errors.New("refusing non-HTTPS authorization URL")
+	}
+	a.log.Info("open this URL to log in if no browser appears", "url", authURL)
+	if e = a.open(authURL); e != nil {
+		a.log.Warn("could not open a browser", "error", e)
 	}
 	var cb callback
 	select {
@@ -168,14 +175,4 @@ func random(n int) (string, error) {
 	b := make([]byte, n)
 	_, e := rand.Read(b)
 	return base64.RawURLEncoding.EncodeToString(b), e
-}
-func openBrowser(raw string) error {
-	u, e := url.Parse(raw)
-	if e != nil {
-		return e
-	}
-	if u.Scheme != "https" {
-		return errors.New("refusing non-HTTPS authorization URL")
-	}
-	return browser.OpenURL(raw)
 }
