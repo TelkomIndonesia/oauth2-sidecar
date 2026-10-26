@@ -89,6 +89,9 @@ func (a *Authenticator) Refresh(ctx context.Context, t *oauth2.Token) (*oauth2.T
 	return (&oauth2.Config{ClientID: a.c.ClientID, Endpoint: a.p.Endpoint, Scopes: strings.Fields(a.c.Scope)}).TokenSource(ctx, t).Token()
 }
 func (a *Authenticator) Login(ctx context.Context) (*oauth2.Token, error) {
+	if a.c.Device {
+		return a.deviceLogin(ctx)
+	}
 	state, e := random(32)
 	if e != nil {
 		return nil, e
@@ -158,8 +161,36 @@ func (a *Authenticator) Login(ctx context.Context) (*oauth2.Token, error) {
 	if e != nil {
 		return nil, e
 	}
+	return a.verifyIDToken(ctx, t)
+}
+
+func (a *Authenticator) deviceLogin(ctx context.Context) (*oauth2.Token, error) {
+	if a.p.client != nil {
+		ctx = oidc.ClientContext(ctx, a.p.client)
+	}
+	cfg := &oauth2.Config{ClientID: a.c.ClientID, Endpoint: a.p.Endpoint, Scopes: strings.Fields(a.c.Scope)}
+	da, e := cfg.DeviceAuth(ctx)
+	if e != nil {
+		return nil, e
+	}
+	verify := da.VerificationURIComplete
+	if verify == "" {
+		verify = da.VerificationURI
+	}
+	if u, e := url.Parse(verify); e != nil || u.Scheme != "https" {
+		return nil, errors.New("refusing non-HTTPS verification URL")
+	}
+	a.log.Info("open this URL on any device to log in", "url", verify, "code", da.UserCode)
+	t, e := cfg.DeviceAccessToken(ctx, da)
+	if e != nil {
+		return nil, e
+	}
+	return a.verifyIDToken(ctx, t)
+}
+
+func (a *Authenticator) verifyIDToken(ctx context.Context, t *oauth2.Token) (*oauth2.Token, error) {
 	if raw, ok := t.Extra("id_token").(string); ok && raw != "" {
-		if _, e = a.p.OIDC.VerifierContext(ctx, &oidc.Config{ClientID: a.c.ClientID}).Verify(ctx, raw); e != nil {
+		if _, e := a.p.OIDC.VerifierContext(ctx, &oidc.Config{ClientID: a.c.ClientID}).Verify(ctx, raw); e != nil {
 			return nil, fmt.Errorf("verify ID token: %w", e)
 		}
 	}
