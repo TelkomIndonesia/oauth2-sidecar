@@ -4,8 +4,12 @@
   Set-StrictMode -Version 3
   $ErrorActionPreference = 'Stop'
   $ProgressPreference = 'SilentlyContinue'
-  # Windows PowerShell 5.1 may not offer TLS 1.2, which GitHub requires.
-  [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+  # Old .NET Framework defaults lack TLS 1.2, which GitHub requires. Leave SystemDefault (0)
+  # alone: the setting is process-wide, and OR-ing in Tls12 would pin it and drop TLS 1.3.
+  $tls = [Net.ServicePointManager]::SecurityProtocol
+  if ($tls -ne 0 -and -not ($tls -band [Net.SecurityProtocolType]::Tls12)) {
+    [Net.ServicePointManager]::SecurityProtocol = $tls -bor [Net.SecurityProtocolType]::Tls12
+  }
 
   $repo = 'TelkomIndonesia/oauth2-sidecar'
   $version = $env:OAUTH2_SIDECAR_VERSION
@@ -35,7 +39,11 @@
     if ((Get-FileHash "$tmp\$asset" -Algorithm SHA256).Hash -ne $line.Split(' ')[0]) { throw "checksum mismatch for $asset" }
     Write-Host "${asset}: OK"
 
-    $target = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\oauth2-sidecar' }
+    $target = if ($env:INSTALL_DIR) {
+      $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:INSTALL_DIR)
+    } else {
+      Join-Path $env:LOCALAPPDATA 'Programs\oauth2-sidecar'
+    }
     Expand-Archive "$tmp\$asset" -DestinationPath "$tmp\x"
     New-Item -ItemType Directory -Path $target -Force | Out-Null
     Copy-Item "$tmp\x\oauth2-sidecar.exe" $target -Force
