@@ -196,3 +196,48 @@ func TestLoginRejectsHTTPAuthorizationURL(t *testing.T) {
 		t.Fatal("non-HTTPS authorization URL accepted")
 	}
 }
+
+func TestDeviceLogin(t *testing.T) {
+	polls := 0
+	var verify string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/device/code":
+			json.NewEncoder(w).Encode(map[string]any{"device_code": "dev", "user_code": "ABCD-EFGH",
+				"verification_uri": "https://auth.example/device", "verification_uri_complete": verify, "expires_in": 60, "interval": 1})
+		case "/token":
+			if r.PostFormValue("device_code") != "dev" {
+				t.Errorf("device_code %q", r.PostFormValue("device_code"))
+			}
+			if polls++; polls == 1 {
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "authorization_pending"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "access", "token_type": "Bearer", "expires_in": 3600})
+		}
+	}))
+	defer srv.Close()
+	p := &Provider{Endpoint: oauth2.Endpoint{DeviceAuthURL: srv.URL + "/device/code", TokenURL: srv.URL + "/token"}, client: srv.Client()}
+	var logs bytes.Buffer
+	a := NewAuthenticator(p, config.Config{ClientID: "client", Scope: "openid", Device: true}, slog.New(slog.NewTextHandler(&logs, nil)))
+	a.open = func(string) error {
+		t.Error("device login opened a browser")
+		return nil
+	}
+
+	verify = "http://auth.example/device?user_code=ABCD-EFGH"
+	if _, e := a.Login(context.Background()); e == nil || polls != 0 {
+		t.Fatalf("non-HTTPS verification URL accepted: %v, polls %d", e, polls)
+	}
+
+	verify = "https://auth.example/device?user_code=ABCD-EFGH"
+	token, e := a.Login(context.Background())
+	if e != nil || token.AccessToken != "access" || polls != 2 {
+		t.Fatalf("device login: token %v, error %v, polls %d", token, e, polls)
+	}
+	if !strings.Contains(logs.String(), verify) || !strings.Contains(logs.String(), "code=ABCD-EFGH") {
+		t.Fatalf("verification URL or code not logged: %s", logs.String())
+	}
+}

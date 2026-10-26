@@ -65,6 +65,10 @@ oauth2-sidecar ... \
 
 The sidecar dials `10.0.0.5` but still sends the `Host` header and TLS SNI for `auth.example.com`, so certificate verification is unchanged. This is useful when the issuer hostname does not resolve inside the sidecar network. Only the sidecar's issuer requests are affected: requests to the issuer hostname bypass any configured HTTP proxy, the embedded browser is unaffected because it uses the system resolver, and requests to any other host are unchanged. The equivalent environment variable is `OAUTH2_SIDECAR_ISSUER_IP`.
 
+## Device login
+
+Use `--device` (`OAUTH2_SIDECAR_DEVICE`, or `device: true` in a config file) where no browser can run, such as a server or a container. The sidecar uses the OAuth 2.0 device authorization grant ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)) and logs a verification URL and user code; approve the login from any device. The provider must advertise `device_authorization_endpoint` in its discovery document, and the verification URL must be HTTPS. Tokens are stored and refreshed the same way as with the browser login.
+
 ## Configuration
 
 Use `--config` to load settings from a YAML or JSON file, from stdin (`-`), or from an `http://` or `https://` URL, so a team can share one routing file:
@@ -83,7 +87,7 @@ oauth2-sidecar --config https://config.example.com/oauth2-sidecar.yaml --listen 
 
 Keys are flag names. Unknown keys are rejected, and `login`, `logout`, and `version` cannot be set from a file. The config decides where tokens are sent, so serve plain `http://` configs only on a network you trust. An `https://` config that redirects to `http://` is rejected. A `--host-route` flag replaces the file's routes rather than adding to them.
 
-Flags take precedence over environment variables, and both take precedence over the config file. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_TOKEN_HEADER`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
+Flags take precedence over environment variables, and both take precedence over the config file. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_TOKEN_HEADER`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, `OAUTH2_SIDECAR_DEVICE`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
 
 ## Security
 
