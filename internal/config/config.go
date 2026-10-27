@@ -34,6 +34,7 @@ type Config struct {
 	Issuer, IssuerIP, ClientID, Scope, Upstream, Listen, RedirectPort, TokenStore string
 	TokenHeader                                                                   string
 	Login                                                                         bool
+	Device                                                                        bool
 	Verbose                                                                       bool
 	InsecureSkipVerify                                                            bool
 	HostRoutes                                                                    map[string]HostRoute
@@ -57,6 +58,7 @@ type cli struct {
 	TokenHeader  string            `name:"token-header" default:"Authorization" help:"Request header that carries the access token as Bearer <token>; other values leave Authorization untouched." placeholder:"NAME"`
 	HostRoutes   map[string]string `name:"host-route" mapsep:"," help:"Route an incoming Host to scheme://remote-host[/path][=remote-ip] (repeatable); remote-ip dials that address while preserving TLS verification for the URL hostname." placeholder:"LOCAL=URL[=IP]"`
 	Login        bool              `name:"login" env:"-" help:"Force authentication, then serve."`
+	Device       bool              `name:"device" help:"Log in with a device code (RFC 8628) instead of a local browser."`
 	SkipVerify   bool              `name:"insecure-skip-verify" help:"Skip TLS certificate verification for proxied upstream requests only; issuer verification is unchanged."`
 	Logout       bool              `name:"logout" env:"-" help:"Delete the stored token, then exit."`
 	Version      bool              `name:"version" env:"-" help:"Print the build version, then exit."`
@@ -187,6 +189,7 @@ func Parse(args []string) (c Config, action Action, err error) {
 		TokenStore:         cl.TokenStore,
 		TokenHeader:        cl.TokenHeader,
 		Login:              cl.Login,
+		Device:             cl.Device,
 		Verbose:            cl.Verbose,
 		InsecureSkipVerify: cl.SkipVerify,
 	}

@@ -175,8 +175,8 @@ func TestParseConfigFile(t *testing.T) {
 
 func TestParseConfigStdinJSON(t *testing.T) {
 	defer func(r io.Reader) { stdin = r }(stdin)
-	stdin = strings.NewReader(`{"issuer": "https://issuer.example", "client-id": "c", "upstream": "https://upstream.example"}`)
-	if c, _, e := Parse([]string{"--config", "-"}); e != nil || c.Upstream != "https://upstream.example" {
+	stdin = strings.NewReader(`{"issuer": "https://issuer.example", "client-id": "c", "upstream": "https://upstream.example", "device": true}`)
+	if c, _, e := Parse([]string{"--config", "-"}); e != nil || c.Upstream != "https://upstream.example" || !c.Device {
 		t.Fatalf("stdin config: %+v %v", c, e)
 	}
 }
