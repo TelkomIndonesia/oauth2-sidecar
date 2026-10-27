@@ -8,10 +8,13 @@ builds:
     binary: oauth2-sidecar
     ldflags:
       - -s -w -X main.version={{.Version}}
-    goos: [linux, darwin]
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
 archives:
   - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
 checksum:
   name_template: checksums.txt
 release:

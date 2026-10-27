@@ -1,12 +1,16 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -96,7 +100,9 @@ func TestIssuerIPAuthentication(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer p.client.CloseIdleConnections()
-	a := NewAuthenticator(p, config.Config{ClientID: "client", Scope: "openid"})
+	var logs bytes.Buffer
+	a := NewAuthenticator(p, config.Config{ClientID: "client", Scope: "openid"}, slog.New(slog.NewTextHandler(&logs, nil)))
+	// Acts as a user who opens the logged URL by hand after the browser failed.
 	a.open = func(raw string) error {
 		u, e := url.Parse(raw)
 		if e != nil {
@@ -117,10 +123,14 @@ func TestIssuerIPAuthentication(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		return resp.Body.Close()
+		resp.Body.Close()
+		return errors.New("no browser")
 	}
 	if token, e := a.Login(ctx); e != nil || token.AccessToken != "access" {
 		t.Fatalf("login failed: %v", e)
+	}
+	if !strings.Contains(logs.String(), issuer+"/authorize?") {
+		t.Fatalf("login URL not logged: %s", logs.String())
 	}
 	if token, e := a.Refresh(ctx, &oauth2.Token{RefreshToken: "refresh"}); e != nil || token.AccessToken != "access" {
 		t.Fatalf("refresh failed: %v", e)
@@ -172,5 +182,17 @@ func TestNewProviderDefaultAndIssuerValidation(t *testing.T) {
 	}
 	if _, e := NewProvider(context.Background(), server.URL, "not-an-ip"); e == nil {
 		t.Fatal("expected invalid IP error")
+	}
+}
+
+func TestLoginRejectsHTTPAuthorizationURL(t *testing.T) {
+	p := &Provider{Endpoint: oauth2.Endpoint{AuthURL: "http://auth.example/authorize"}}
+	a := NewAuthenticator(p, config.Config{ClientID: "client", Scope: "openid"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	a.open = func(string) error {
+		t.Error("opened a non-HTTPS authorization URL")
+		return nil
+	}
+	if _, e := a.Login(context.Background()); e == nil {
+		t.Fatal("non-HTTPS authorization URL accepted")
 	}
 }
