@@ -57,7 +57,7 @@ func main() {
 	a := auth.NewAuthenticator(p, c, log)
 	m := token.NewManager(s, a)
 	log.Info("acquiring token", "store", c.TokenStore)
-	if _, e = m.Token(context.Background()); e != nil {
+	if _, e = m.Acquire(context.Background(), c.Login); e != nil {
 		panic(e)
 	}
 	pr, e := proxy.New(c.Upstream, m, log, c.HostRoutes, c.InsecureSkipVerify, c.TokenHeader)

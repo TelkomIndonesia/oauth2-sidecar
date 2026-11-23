@@ -38,3 +38,45 @@ func TestFileStoreProfile(t *testing.T) {
 		t.Fatal("same profile did not reuse token", err)
 	}
 }
+
+type loginStub struct {
+	Authenticator
+	calls int
+	err   error
+}
+
+func (a *loginStub) Login(context.Context) (*oauth2.Token, error) {
+	a.calls++
+	return &oauth2.Token{AccessToken: "fresh"}, a.err
+}
+
+func TestForcedLogin(t *testing.T) {
+	ctx := context.Background()
+	store := NewFileStore(filepath.Join(t.TempDir(), "cache"), "issuer", "client", "openid")
+	if err := store.Save(ctx, &oauth2.Token{AccessToken: "cached"}); err != nil {
+		t.Fatal(err)
+	}
+	auth := &loginStub{}
+	manager := NewManager(store, auth)
+	tok, err := manager.Acquire(ctx, false)
+	if err != nil || tok.AccessToken != "cached" || auth.calls != 0 {
+		t.Fatal("normal startup did not reuse cache", err)
+	}
+	auth.err = errors.New("login failed")
+	if _, err := manager.Acquire(ctx, true); !errors.Is(err, auth.err) {
+		t.Fatal("missing login failure", err)
+	}
+	tok, err = store.Load(ctx)
+	if err != nil || tok.AccessToken != "cached" {
+		t.Fatal("failed login replaced cache", err)
+	}
+	auth.err = nil
+	tok, err = manager.Acquire(ctx, true)
+	if err != nil || tok.AccessToken != "fresh" || auth.calls != 2 {
+		t.Fatal("forced login did not authenticate", err)
+	}
+	tok, err = store.Load(ctx)
+	if err != nil || tok.AccessToken != "fresh" {
+		t.Fatal("fresh token missing from cache", err)
+	}
+}

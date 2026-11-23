@@ -108,6 +108,15 @@ type call struct {
 }
 
 func NewManager(s Store, a Authenticator) *Manager { return &Manager{store: s, auth: a} }
+
+// Acquire selects the initial token before the proxy starts serving.
+func (m *Manager) Acquire(ctx context.Context, forceLogin bool) (*oauth2.Token, error) {
+	if forceLogin {
+		return m.login(ctx)
+	}
+	return m.Token(ctx)
+}
+
 func (m *Manager) Token(ctx context.Context) (*oauth2.Token, error) {
 	m.mu.Lock()
 	if m.t != nil && m.t.Valid() {
