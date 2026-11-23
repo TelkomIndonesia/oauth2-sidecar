@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,14 @@ import (
 )
 
 var version = "dev"
+
+func cacheListenerAddress(configured string, ln net.Listener) string {
+	_, port, _ := net.SplitHostPort(configured)
+	if strings.Trim(port, "0") == "" {
+		return ln.Addr().String()
+	}
+	return configured
+}
 
 func main() {
 	c, action, e := config.Parse(os.Args[1:])
@@ -47,9 +56,7 @@ func main() {
 			panic(e)
 		}
 		defer ln.Close()
-		if _, port, _ := net.SplitHostPort(c.Listen); port == "0" {
-			cacheListen = ln.Addr().String()
-		}
+		cacheListen = cacheListenerAddress(c.Listen, ln)
 	}
 	if c.TokenStore == "" {
 		c.TokenStore, e = token.DefaultPath(c.Issuer, c.ClientID, c.Scope, cacheListen)
