@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,14 @@ import (
 )
 
 var version = "dev"
+
+func cacheListenerAddress(configured string, ln net.Listener) string {
+	_, port, _ := net.SplitHostPort(configured)
+	if strings.Trim(port, "0") == "" {
+		return ln.Addr().String()
+	}
+	return configured
+}
 
 func main() {
 	c, action, e := config.Parse(os.Args[1:])
@@ -39,7 +48,23 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, opts))
 	slog.SetDefault(log)
-	s := token.NewFileStore(c.TokenStore)
+	var ln net.Listener
+	cacheListen := c.Listen
+	if action != config.ActionLogout {
+		ln, e = net.Listen("tcp", c.Listen)
+		if e != nil {
+			panic(e)
+		}
+		defer ln.Close()
+		cacheListen = cacheListenerAddress(c.Listen, ln)
+	}
+	if c.TokenStore == "" {
+		c.TokenStore, e = token.DefaultPath(c.Issuer, c.ClientID, c.Scope, cacheListen)
+		if e != nil {
+			panic(e)
+		}
+	}
+	s := token.NewFileStore(c.TokenStore, c.Issuer, c.ClientID, c.Scope)
 	if action == config.ActionLogout {
 		e = s.Delete(context.Background())
 		if e != nil && !errors.Is(e, token.ErrNotFound) {
@@ -57,18 +82,13 @@ func main() {
 	a := auth.NewAuthenticator(p, c, log)
 	m := token.NewManager(s, a)
 	log.Info("acquiring token", "store", c.TokenStore)
-	if _, e = m.Token(context.Background()); e != nil {
+	if _, e = m.Acquire(context.Background(), c.Login); e != nil {
 		panic(e)
 	}
 	pr, e := proxy.New(c.Upstream, m, log, c.HostRoutes, c.InsecureSkipVerify, c.TokenHeader)
 	if e != nil {
 		panic(e)
 	}
-	ln, e := net.Listen("tcp", c.Listen)
-	if e != nil {
-		panic(e)
-	}
-	defer ln.Close()
 	log.Info("listening", "address", ln.Addr().String(), "upstream", c.Upstream)
 	if host, _, _ := net.SplitHostPort(ln.Addr().String()); host != "127.0.0.1" && host != "::1" {
 		log.Warn("non-loopback listen address", "address", ln.Addr().String())

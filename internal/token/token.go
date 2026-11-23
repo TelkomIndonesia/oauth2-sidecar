@@ -2,11 +2,15 @@ package token
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"golang.org/x/oauth2"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 )
 
@@ -17,7 +21,21 @@ type Store interface {
 	Save(context.Context, *oauth2.Token) error
 	Delete(context.Context) error
 }
-type fileStore struct{ path string }
+type profile struct {
+	Issuer   string
+	ClientID string
+	Scope    string
+}
+
+type cacheEntry struct {
+	Profile profile
+	Token   *oauth2.Token
+}
+
+type fileStore struct {
+	path    string
+	profile profile
+}
 
 func (s fileStore) Load(_ context.Context) (*oauth2.Token, error) {
 	b, e := os.ReadFile(s.path)
@@ -27,15 +45,20 @@ func (s fileStore) Load(_ context.Context) (*oauth2.Token, error) {
 	if e != nil {
 		return nil, e
 	}
-	var t oauth2.Token
-	e = json.Unmarshal(b, &t)
-	return &t, e
+	var entry cacheEntry
+	if e := json.Unmarshal(b, &entry); e != nil {
+		return nil, e
+	}
+	if entry.Profile != s.profile || entry.Token == nil {
+		return nil, ErrNotFound
+	}
+	return entry.Token, nil
 }
 func (s fileStore) Save(_ context.Context, t *oauth2.Token) error {
 	if e := os.MkdirAll(filepath.Dir(s.path), 0700); e != nil {
 		return e
 	}
-	b, e := json.Marshal(t)
+	b, e := json.Marshal(cacheEntry{Profile: s.profile, Token: t})
 	if e != nil {
 		return e
 	}
@@ -63,7 +86,31 @@ func (s fileStore) Delete(_ context.Context) error {
 	}
 	return e
 }
-func NewFileStore(p string) Store { return fileStore{p} }
+func NewFileStore(path, issuer, clientID, scope string) Store {
+	return fileStore{path: path, profile: newProfile(issuer, clientID, scope)}
+}
+
+func newProfile(issuer, clientID, scope string) profile {
+	scopes := strings.Fields(scope)
+	sort.Strings(scopes)
+	return profile{Issuer: issuer, ClientID: clientID, Scope: strings.Join(scopes, " ")}
+}
+
+func DefaultPath(issuer, clientID, scope, listen string) (string, error) {
+	if issuer == "" || clientID == "" {
+		return "", errors.New("default token cache requires --issuer and --client-id")
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	p := newProfile(issuer, clientID, scope)
+	key, err := json.Marshal([4]string{p.Issuer, p.ClientID, p.Scope, listen})
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "oauth2-sidecar", fmt.Sprintf("token-%x.json", sha256.Sum256(key))), nil
+}
 
 type Authenticator interface {
 	Login(context.Context) (*oauth2.Token, error)
@@ -83,6 +130,15 @@ type call struct {
 }
 
 func NewManager(s Store, a Authenticator) *Manager { return &Manager{store: s, auth: a} }
+
+// Acquire selects the initial token before the proxy starts serving.
+func (m *Manager) Acquire(ctx context.Context, forceLogin bool) (*oauth2.Token, error) {
+	if forceLogin {
+		return m.login(ctx)
+	}
+	return m.Token(ctx)
+}
+
 func (m *Manager) Token(ctx context.Context) (*oauth2.Token, error) {
 	m.mu.Lock()
 	if m.t != nil && m.t.Valid() {

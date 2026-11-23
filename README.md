@@ -87,6 +87,8 @@ oauth2-sidecar --config https://config.example.com/oauth2-sidecar.yaml --listen 
 
 Keys are flag names. Unknown keys are rejected, and `login`, `logout`, and `version` cannot be set from a file. The config decides where tokens are sent, so serve plain `http://` configs only on a network you trust. An `https://` config that redirects to `http://` is rejected. A `--host-route` flag replaces the file's routes rather than adding to them.
 
+The default token cache is separate for each issuer, client ID, scope set, and listen address. Use a different fixed listen port for each independent session to reuse its cache after restarting. With port zero, the assigned listener address selects the cache. For logout, use the same profile and listen address, or use the exact cache path with `--token-store`. An explicit `--token-store` selects one file, so give independent sessions different paths. The first run with the new default requires login. The old `token.json` remains on disk.
+
 Flags take precedence over environment variables, and both take precedence over the config file. Run `oauth2-sidecar --help` for the full list. Supported environment variables include `OAUTH2_SIDECAR_ISSUER`, `OAUTH2_SIDECAR_ISSUER_IP`, `OAUTH2_SIDECAR_CLIENT_ID`, `OAUTH2_SIDECAR_SCOPE`, `OAUTH2_SIDECAR_UPSTREAM`, `OAUTH2_SIDECAR_LISTEN`, `OAUTH2_SIDECAR_REDIRECT_PORT`, `OAUTH2_SIDECAR_TOKEN_STORE`, `OAUTH2_SIDECAR_TOKEN_HEADER`, `OAUTH2_SIDECAR_HOST_ROUTE`, `OAUTH2_SIDECAR_INSECURE_SKIP_VERIFY`, `OAUTH2_SIDECAR_DEVICE`, and `OAUTH2_SIDECAR_VERBOSE`. Use `--login` to force authentication, `--logout` to remove the saved token, and `--version` to print the build version. Use `--verbose` (or `-v`) to enable debug logging.
 
 ## Security

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -236,13 +235,6 @@ func Parse(args []string) (c Config, action Action, err error) {
 	}
 	if c.TokenHeader == "" || strings.Trim(c.TokenHeader, headerChars) != "" {
 		return c, ActionRun, errors.New("--token-header must be a valid header name")
-	}
-	if c.TokenStore == "" {
-		d, e := os.UserConfigDir()
-		if e != nil {
-			return c, ActionRun, e
-		}
-		c.TokenStore = filepath.Join(d, "oauth2-sidecar", "token.json")
 	}
 	if strings.TrimSpace(c.Scope) == "" {
 		return c, ActionRun, errors.New("--scope cannot be empty")
