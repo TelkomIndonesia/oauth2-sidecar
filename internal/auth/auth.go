@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -113,24 +114,24 @@ func (a *Authenticator) Login(ctx context.Context) (*oauth2.Token, error) {
 	defer ln.Close()
 	redirect := "http://" + ln.Addr().String() + "/callback"
 	result := make(chan callback, 1)
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var once sync.Once
+	srv := &http.Server{ReadHeaderTimeout: 10 * time.Second, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/callback" {
 			http.NotFound(w, r)
 			return
 		}
 		if r.URL.Query().Get("state") != state {
-			result <- callback{e: errors.New("OAuth state mismatch")}
 			http.Error(w, "authentication failed", 400)
 			return
 		}
 		code := r.URL.Query().Get("code")
 		if code == "" {
-			result <- callback{e: fmt.Errorf("authorization failed: %s", r.URL.Query().Get("error"))}
+			once.Do(func() { result <- callback{e: fmt.Errorf("authorization failed: %s", r.URL.Query().Get("error"))} })
 			http.Error(w, "authentication failed", 400)
 			return
 		}
-		fmt.Fprintln(w, "Authentication complete. You can close this window.")
-		result <- callback{code: code}
+		fmt.Fprintln(w, "Callback received. You can close this window and check the sidecar for login status.")
+		once.Do(func() { result <- callback{code: code} })
 	})}
 	go srv.Serve(ln)
 	defer srv.Shutdown(context.Background())

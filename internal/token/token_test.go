@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
@@ -114,5 +115,70 @@ func TestIndependentSessionUpdates(t *testing.T) {
 	first := path("client", "openid profile", "localhost:8001")
 	if first == path("other", "openid profile", "localhost:8001") || first != path("client", "profile openid", "localhost:8001") {
 		t.Fatal("unstable profile key")
+	}
+}
+
+type testAuth struct {
+	refreshErr               error
+	loginCount, refreshCount int
+}
+
+func (a *testAuth) Login(context.Context) (*oauth2.Token, error) {
+	a.loginCount++
+	return &oauth2.Token{AccessToken: "login"}, nil
+}
+func (a *testAuth) Refresh(context.Context, *oauth2.Token) (*oauth2.Token, error) {
+	a.refreshCount++
+	return &oauth2.Token{AccessToken: "refreshed"}, a.refreshErr
+}
+
+func TestAcquire(t *testing.T) {
+	transient := errors.New("issuer unavailable")
+	for _, tc := range []struct {
+		name              string
+		expired, force    bool
+		refreshErr        error
+		want              string
+		logins, refreshes int
+	}{
+		{"cached", false, false, nil, "saved", 0, 0},
+		{"force", false, true, nil, "login", 1, 0},
+		{"expired", true, false, nil, "refreshed", 0, 1},
+		{"temporary failure", true, false, transient, "", 0, 1},
+		{"revoked", true, false, &oauth2.RetrieveError{ErrorCode: "invalid_grant"}, "login", 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := NewFileStore(filepath.Join(t.TempDir(), "token.json"), "issuer", "client", "openid")
+			old := &oauth2.Token{AccessToken: "saved", RefreshToken: "refresh"}
+			if tc.expired {
+				old.Expiry = time.Now().Add(-time.Hour)
+			}
+			if err := s.Save(ctx, old); err != nil {
+				t.Fatal(err)
+			}
+			a := &testAuth{refreshErr: tc.refreshErr}
+			got, err := NewManager(s, a).Acquire(ctx, tc.force)
+			if tc.want == "" {
+				if !errors.Is(err, transient) {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else if err != nil || got.AccessToken != tc.want {
+				t.Fatalf("token %v, error %v", got, err)
+			}
+			saved, err := s.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want != "" && saved.AccessToken != tc.want || tc.want == "" && saved.AccessToken != "saved" {
+				t.Fatalf("unexpected persisted access token %q", saved.AccessToken)
+			}
+			if tc.want == "refreshed" && saved.RefreshToken != "refresh" {
+				t.Fatal("refresh token lost")
+			}
+			if a.loginCount != tc.logins || a.refreshCount != tc.refreshes {
+				t.Fatalf("logins %d, refreshes %d", a.loginCount, a.refreshCount)
+			}
+		})
 	}
 }

@@ -45,10 +45,10 @@ func TestIssuerIPAuthentication(t *testing.T) {
 		switch r.URL.Path {
 		case "/realm/.well-known/openid-configuration":
 			json.NewEncoder(w).Encode(map[string]any{
-				"issuer": issuer,
-				"authorization_endpoint": issuer + "/authorize",
-				"token_endpoint": issuer + "/token",
-				"jwks_uri": issuer + "/keys",
+				"issuer":                                issuer,
+				"authorization_endpoint":                issuer + "/authorize",
+				"token_endpoint":                        issuer + "/token",
+				"jwks_uri":                              issuer + "/keys",
 				"id_token_signing_alg_values_supported": []string{"RS256"},
 			})
 		case "/realm/token":
@@ -123,7 +123,11 @@ func TestIssuerIPAuthentication(t *testing.T) {
 		if e != nil {
 			return e
 		}
-		resp.Body.Close()
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil || !strings.Contains(string(body), "Callback received") {
+			t.Errorf("callback receipt: %s, %v", body, err)
+		}
 		return errors.New("no browser")
 	}
 	if token, e := a.Login(ctx); e != nil || token.AccessToken != "access" {

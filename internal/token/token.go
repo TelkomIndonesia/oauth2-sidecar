@@ -131,69 +131,26 @@ type call struct {
 
 func NewManager(s Store, a Authenticator) *Manager { return &Manager{store: s, auth: a} }
 
-// Acquire selects the initial token before the proxy starts serving.
-func (m *Manager) Acquire(ctx context.Context, forceLogin bool) (*oauth2.Token, error) {
-	if forceLogin {
-		return m.login(ctx)
-	}
-	return m.Token(ctx)
+func (m *Manager) Token(ctx context.Context) (*oauth2.Token, error) {
+	return m.Acquire(ctx, false)
 }
 
-func (m *Manager) Token(ctx context.Context) (*oauth2.Token, error) {
-	m.mu.Lock()
-	if m.t != nil && m.t.Valid() {
-		t := m.t
-		m.mu.Unlock()
-		return t, nil
-	}
-	if m.t == nil {
-		if t, e := m.store.Load(ctx); e == nil {
-			m.t = t
-			if t.Valid() {
-				m.mu.Unlock()
-				return t, nil
-			}
-		}
-	}
-	old := m.t
-	m.mu.Unlock()
-	if old != nil && old.RefreshToken != "" {
-		if t, e := m.refresh(ctx, old); e == nil {
-			return t, nil
-		}
-	}
-	return m.login(ctx)
-}
 func (m *Manager) AccessToken(ctx context.Context) (string, error) {
-	t, e := m.Token(ctx)
-	if e != nil {
-		return "", e
+	t, err := m.Token(ctx)
+	if err != nil {
+		return "", err
 	}
 	return t.AccessToken, nil
 }
-func (m *Manager) refresh(ctx context.Context, old *oauth2.Token) (*oauth2.Token, error) {
-	return m.single(ctx, func(c context.Context) (*oauth2.Token, error) {
-		t, e := m.auth.Refresh(c, old)
-		if e == nil {
-			if t.RefreshToken == "" {
-				t.RefreshToken = old.RefreshToken
-			}
-			e = m.store.Save(c, t)
-		}
-		return t, e
-	})
-}
-func (m *Manager) login(ctx context.Context) (*oauth2.Token, error) {
-	return m.single(ctx, func(c context.Context) (*oauth2.Token, error) {
-		t, e := m.auth.Login(c)
-		if e == nil {
-			e = m.store.Save(c, t)
-		}
-		return t, e
-	})
-}
-func (m *Manager) single(ctx context.Context, fn func(context.Context) (*oauth2.Token, error)) (*oauth2.Token, error) {
+
+// forceLogin is used at startup, before requests can arrive.
+func (m *Manager) Acquire(ctx context.Context, forceLogin bool) (*oauth2.Token, error) {
 	m.mu.Lock()
+	old := m.t
+	if !forceLogin && old.Valid() {
+		m.mu.Unlock()
+		return old, nil
+	}
 	if m.inflight != nil {
 		c := m.inflight
 		m.mu.Unlock()
@@ -207,7 +164,7 @@ func (m *Manager) single(ctx context.Context, fn func(context.Context) (*oauth2.
 	c := &call{done: make(chan struct{})}
 	m.inflight = c
 	m.mu.Unlock()
-	t, e := fn(ctx)
+	t, e := m.acquire(ctx, old, forceLogin)
 	m.mu.Lock()
 	if e == nil {
 		m.t = t
@@ -217,4 +174,37 @@ func (m *Manager) single(ctx context.Context, fn func(context.Context) (*oauth2.
 	m.inflight = nil
 	m.mu.Unlock()
 	return t, e
+}
+
+func (m *Manager) acquire(ctx context.Context, old *oauth2.Token, forceLogin bool) (*oauth2.Token, error) {
+	if !forceLogin {
+		if old == nil {
+			var err error
+			old, err = m.store.Load(ctx)
+			if err != nil && !errors.Is(err, ErrNotFound) {
+				return nil, err
+			}
+		}
+		if old.Valid() {
+			return old, nil
+		}
+		if old != nil && old.RefreshToken != "" {
+			t, err := m.auth.Refresh(ctx, old)
+			if err == nil {
+				if t.RefreshToken == "" {
+					t.RefreshToken = old.RefreshToken
+				}
+				return t, m.store.Save(ctx, t)
+			}
+			var rejected *oauth2.RetrieveError
+			if !errors.As(err, &rejected) || rejected.ErrorCode != "invalid_grant" {
+				return nil, err
+			}
+		}
+	}
+	t, err := m.auth.Login(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return t, m.store.Save(ctx, t)
 }
