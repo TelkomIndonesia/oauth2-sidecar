@@ -39,7 +39,7 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, opts))
 	slog.SetDefault(log)
-	s := token.NewFileStore(c.TokenStore)
+	s := token.NewFileStore(c.TokenStore, c.Issuer, c.ClientID, c.Scope)
 	if action == config.ActionLogout {
 		e = s.Delete(context.Background())
 		if e != nil && !errors.Is(e, token.ErrNotFound) {
