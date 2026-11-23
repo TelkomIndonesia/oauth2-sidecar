@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -30,8 +31,22 @@ func cacheListenerAddress(configured string, ln net.Listener) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "device" || os.Args[1] == "validate") {
+		var err error
+		if os.Args[1] == "device" {
+			err = device(os.Args[2:])
+		} else {
+			err = validate(os.Args[2:])
+		}
+		if err != nil && !errors.Is(err, flag.ErrHelp) {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	c, action, e := config.Parse(os.Args[1:])
 	if errors.Is(e, config.ErrHelp) {
+		fmt.Println("Personal access: oauth2-sidecar device --help | oauth2-sidecar validate --help")
 		return
 	}
 	if e != nil {
@@ -42,6 +57,11 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+	runProxy(c, action, false)
+}
+
+func runProxy(c config.Config, action config.Action, local bool) {
+	var e error
 	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
 	if c.Verbose {
 		opts.Level = slog.LevelDebug
@@ -93,7 +113,11 @@ func main() {
 	if host, _, _ := net.SplitHostPort(ln.Addr().String()); host != "127.0.0.1" && host != "::1" {
 		log.Warn("non-loopback listen address", "address", ln.Addr().String())
 	}
-	srv := &http.Server{Handler: pr, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
+	var handler http.Handler = pr
+	if local {
+		handler = deviceHandler(pr)
+	}
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {

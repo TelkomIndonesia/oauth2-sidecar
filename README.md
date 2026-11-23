@@ -16,6 +16,44 @@ oauth2-sidecar \
 
 On Windows, install from PowerShell with `irm https://raw.githubusercontent.com/TelkomIndonesia/oauth2-sidecar/main/install.ps1 | iex`; it puts `oauth2-sidecar.exe` in `%LOCALAPPDATA%\Programs\oauth2-sidecar` and adds that folder to the user `Path`. The first run opens a browser and also logs the login URL, so it can be opened by hand where no browser starts (for example WSL without `wslu`, or over SSH). The client can then call `http://127.0.0.1:8080/v1/foo`; the sidecar forwards it to the upstream with `Authorization: Bearer <access_token>`. The default listener is loopback. Register `http://127.0.0.1:<port>/callback` with the provider, or use `--redirect-port` for a stable callback port.
 
+## Personal access through a validator
+
+The `device` command runs on each developer's computer. The `validate` command runs behind the HTTPS route in OpenShift. Each request carries the developer's OAuth access token to the validator. The backend receives its original application credentials and payload.
+
+**Server.** Register a dedicated public GitLab OAuth application with the `openid` and `email` scopes and the redirect URI `http://127.0.0.1:8250/callback`. Run the validator with that application's ID, the GitLab user IDs allowed to access this backend, and a fixed backend URL:
+
+```sh
+oauth2-sidecar validate --issuer https://gitlab.example.com \
+  --client-id my-public-app-id --allow-users 17,24 \
+  --upstream http://my-api:8080 --listen :8080
+```
+
+Target the validator with the HTTPS route and restrict direct access to the backend according to your cluster policy. An alternative route directly to the application remains outside this check. A [Containerfile](deploy/validator.Containerfile) builds the binary for an OpenShift deployment. The runtime needs the GitLab HTTPS CA and outbound access to GitLab.
+
+The validator checks each request against GitLab's `/oauth/token/info` and `/oauth/userinfo`. It checks the OAuth application ID, `openid` scope, allowed user ID, and matching subject. It removes the device credential header (`X-Sidecar-Authorization`) before forwarding. Authorization logs include `oidc_issuer`, `oidc_sub`, and `gitlab_email` when GitLab supplies a verified email. If GitLab is unavailable, validation fails closed. [GitLab token information](https://docs.gitlab.com/api/oauth2/#retrieve-the-token-information) · [GitLab OIDC claims](https://docs.gitlab.com/integration/openid_connect_provider/#shared-information)
+
+**Developer computer.** Install a version that includes `device` (Linux, macOS, or Windows; amd64 or arm64). The Unix installer is in Quick start above. On Windows, the same release can be installed with curl from PowerShell:
+
+```powershell
+$installer = curl.exe -fsSL https://raw.githubusercontent.com/TelkomIndonesia/oauth2-sidecar/main/install.ps1
+if ($LASTEXITCODE -eq 0) { & ([scriptblock]::Create(($installer -join [Environment]::NewLine))) }
+```
+
+Configure each computer once. Enter the GitLab issuer, public OAuth application ID, and HTTPS validator URL supplied by your administrator. Complete personal sign-in in the browser.
+
+```sh
+oauth2-sidecar device setup
+oauth2-sidecar device
+```
+
+With the device command running, call the local listener from another terminal. Keep the original method, path, headers, and body. The base URL becomes `http://127.0.0.1:18080`:
+
+```sh
+curl -H 'Content-Type: application/json' -d '{"operation":"example"}' http://127.0.0.1:18080/rpc
+```
+
+Setup saves `device.json` in the OS user's configuration directory under `oauth2-sidecar`. Token storage is separate per OS profile, issuer, application, scopes, and validator URL. The client reuses valid tokens and refreshes expired ones. Stop the client before `oauth2-sidecar device logout` to delete its local cache, or use `oauth2-sidecar device login` to force a fresh sign-in. Use the listener on a personal workstation: local processes able to reach it can act through that user's session.
+
 ## Host routes
 
 Use the repeatable `--host-route local-host=scheme://remote-host[/path][=remote-ip]` option to send requests for a specific local hostname to a different origin and base path:
