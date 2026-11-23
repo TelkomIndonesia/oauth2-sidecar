@@ -2,8 +2,10 @@ package token
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"golang.org/x/oauth2"
 	"os"
 	"path/filepath"
@@ -85,9 +87,29 @@ func (s fileStore) Delete(_ context.Context) error {
 	return e
 }
 func NewFileStore(path, issuer, clientID, scope string) Store {
+	return fileStore{path: path, profile: newProfile(issuer, clientID, scope)}
+}
+
+func newProfile(issuer, clientID, scope string) profile {
 	scopes := strings.Fields(scope)
 	sort.Strings(scopes)
-	return fileStore{path: path, profile: profile{Issuer: issuer, ClientID: clientID, Scope: strings.Join(scopes, " ")}}
+	return profile{Issuer: issuer, ClientID: clientID, Scope: strings.Join(scopes, " ")}
+}
+
+func DefaultPath(issuer, clientID, scope, listen string) (string, error) {
+	if issuer == "" || clientID == "" {
+		return "", errors.New("default token cache requires --issuer and --client-id")
+	}
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	p := newProfile(issuer, clientID, scope)
+	key, err := json.Marshal([4]string{p.Issuer, p.ClientID, p.Scope, listen})
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "oauth2-sidecar", fmt.Sprintf("token-%x.json", sha256.Sum256(key))), nil
 }
 
 type Authenticator interface {

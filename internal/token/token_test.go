@@ -80,3 +80,39 @@ func TestForcedLogin(t *testing.T) {
 		t.Fatal("fresh token missing from cache", err)
 	}
 }
+
+func TestIndependentSessionUpdates(t *testing.T) {
+	ctx := context.Background()
+	path := func(client, scope, listen string) string {
+		t.Helper()
+		p, err := DefaultPath("issuer", client, scope, listen)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Base(p)
+	}
+	dir := t.TempDir()
+	open := func(port string) Store {
+		return NewFileStore(filepath.Join(dir, path("client", "openid profile", port)), "issuer", "client", "openid profile")
+	}
+	a, b := open("localhost:8001"), open("localhost:8002")
+	save := func(s Store, v string) {
+		t.Helper()
+		if err := s.Save(ctx, &oauth2.Token{AccessToken: v}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(a, "first")
+	save(b, "second")
+	save(a, "updated")
+	for port, want := range map[string]string{"localhost:8001": "updated", "localhost:8002": "second"} {
+		tok, err := open(port).Load(ctx)
+		if err != nil || tok.AccessToken != want {
+			t.Fatalf("session %s lost its update: %v", port, err)
+		}
+	}
+	first := path("client", "openid profile", "localhost:8001")
+	if first == path("other", "openid profile", "localhost:8001") || first != path("client", "profile openid", "localhost:8001") {
+		t.Fatal("unstable profile key")
+	}
+}

@@ -39,6 +39,24 @@ func main() {
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, opts))
 	slog.SetDefault(log)
+	var ln net.Listener
+	cacheListen := c.Listen
+	if action != config.ActionLogout {
+		ln, e = net.Listen("tcp", c.Listen)
+		if e != nil {
+			panic(e)
+		}
+		defer ln.Close()
+		if _, port, _ := net.SplitHostPort(c.Listen); port == "0" {
+			cacheListen = ln.Addr().String()
+		}
+	}
+	if c.TokenStore == "" {
+		c.TokenStore, e = token.DefaultPath(c.Issuer, c.ClientID, c.Scope, cacheListen)
+		if e != nil {
+			panic(e)
+		}
+	}
 	s := token.NewFileStore(c.TokenStore, c.Issuer, c.ClientID, c.Scope)
 	if action == config.ActionLogout {
 		e = s.Delete(context.Background())
@@ -64,11 +82,6 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
-	ln, e := net.Listen("tcp", c.Listen)
-	if e != nil {
-		panic(e)
-	}
-	defer ln.Close()
 	log.Info("listening", "address", ln.Addr().String(), "upstream", c.Upstream)
 	if host, _, _ := net.SplitHostPort(ln.Addr().String()); host != "127.0.0.1" && host != "::1" {
 		log.Warn("non-loopback listen address", "address", ln.Addr().String())
