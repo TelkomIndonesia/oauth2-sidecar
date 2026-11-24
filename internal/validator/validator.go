@@ -3,7 +3,9 @@ package validator
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"slices"
 	"strconv"
@@ -31,7 +34,11 @@ type identity struct {
 	validUntil time.Time
 }
 
+type auditContextKey struct{}
+type auditIdentity struct{ sub, requestID string }
+
 type handler struct {
+	trustedProxies   []netip.Prefix
 	issuer, clientID string
 	users            map[string]bool
 	infoURL, userURL *url.URL
@@ -40,12 +47,13 @@ type handler struct {
 	log              *slog.Logger
 	now              func() time.Time
 
-	mu    sync.Mutex
-	cache map[[sha256.Size]byte]identity
+	lookups lookupBudget
+	mu      sync.Mutex
+	cache   map[[sha256.Size]byte]identity
 }
 
 // New constructs a forwarder for one backend. Application Authorization headers pass through.
-func New(issuer, clientID, upstream string, allowed []string, log *slog.Logger) (http.Handler, error) {
+func New(issuer, clientID, upstream string, allowed []string, log *slog.Logger, trustedProxies ...netip.Prefix) (http.Handler, error) {
 	idp, err := url.Parse(issuer)
 	if err != nil || idp.Scheme != "https" || idp.Hostname() == "" || idp.User != nil || idp.RawQuery != "" || idp.Fragment != "" {
 		return nil, errors.New("a GitLab HTTPS issuer URL is required")
@@ -66,14 +74,31 @@ func New(issuer, clientID, upstream string, allowed []string, log *slog.Logger) 
 		users[sub] = true
 	}
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	proxy := &httputil.ReverseProxy{Rewrite: func(p *httputil.ProxyRequest) {
-		p.SetURL(target)
-		p.SetXForwarded()
-		p.Out.Header.Del(Header)
-		p.Out.Trailer.Del(Header)
-	}}
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(p *httputil.ProxyRequest) {
+			p.SetURL(target)
+			p.SetXForwarded()
+			p.Out.Header.Del(Header)
+			p.Out.Trailer.Del(Header)
+			audit := p.In.Context().Value(auditContextKey{}).(auditIdentity)
+			p.Out.Header.Set("X-Forwarded-User", audit.sub)
+			p.Out.Header.Set("X-Request-ID", audit.requestID)
+			p.Out.Trailer.Del("X-Forwarded-User")
+			p.Out.Trailer.Del("X-Request-ID")
+		},
+		ModifyResponse: func(resp *http.Response) error {
+			if resp.Request == nil {
+				return nil
+			}
+			requestID := resp.Request.Header.Get("X-Request-ID")
+			if backendID := resp.Header.Get("X-Request-ID"); backendID != "" && backendID != requestID {
+				log.InfoContext(resp.Request.Context(), "backend request ID", "request_id", requestID, "backend_request_id", backendID)
+			}
+			return nil
+		},
+	}
 	return &handler{
-		issuer: issuer, clientID: clientID, users: users,
+		issuer: issuer, clientID: clientID, users: users, trustedProxies: trustedProxies,
 		infoURL: idp.JoinPath("oauth/token/info"), userURL: idp.JoinPath("oauth/userinfo"),
 		client: client, proxy: proxy, log: log, now: time.Now,
 		cache: make(map[[sha256.Size]byte]identity),
@@ -92,15 +117,35 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, ok := h.cache[key]
 	h.mu.Unlock()
 	if !ok || !started.Before(id.validUntil) {
+		refund, retry := h.lookups.reserve(lookupPeer(r, h.trustedProxies), started)
+		if refund == nil {
+			w.Header().Set("Retry-After", strconv.Itoa(retry))
+			http.Error(w, "too many validation attempts", http.StatusTooManyRequests)
+			return
+		}
 		id, ok = h.verify(w, r, bearer, started)
 		if !ok {
 			return
 		}
+		refund()
 		if !id.validUntil.IsZero() {
 			h.remember(key, id)
 		}
 	}
-	attrs := []slog.Attr{slog.String("oidc_issuer", h.issuer), slog.String("oidc_sub", id.sub), slog.String("method", r.Method), slog.String("path", r.URL.Path)}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		http.Error(w, "could not assign request ID", http.StatusInternalServerError)
+		return
+	}
+	audit := auditIdentity{sub: id.sub, requestID: hex.EncodeToString(nonce[:])}
+	r = r.WithContext(context.WithValue(r.Context(), auditContextKey{}, audit))
+	attrs := []slog.Attr{
+		slog.String("request_id", audit.requestID),
+		slog.String("oidc_issuer", h.issuer),
+		slog.String("oidc_sub", id.sub),
+		slog.String("method", r.Method),
+		slog.String("path", r.URL.Path),
+	}
 	if id.email != "" {
 		attrs = append(attrs, slog.String("gitlab_email", id.email))
 	}

@@ -18,6 +18,7 @@ import (
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/config"
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/proxy"
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/token"
+	"github.com/TelkomIndonesia/oauth2-sidecar/internal/validator"
 )
 
 var version = "dev"
@@ -31,13 +32,8 @@ func cacheListenerAddress(configured string, ln net.Listener) string {
 }
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "device" || os.Args[1] == "validate") {
-		var err error
-		if os.Args[1] == "device" {
-			err = device(os.Args[2:])
-		} else {
-			err = validate(os.Args[2:])
-		}
+	if len(os.Args) > 1 && os.Args[1] == "validate" {
+		err := validate(os.Args[2:])
 		if err != nil && !errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -46,7 +42,7 @@ func main() {
 	}
 	c, action, e := config.Parse(os.Args[1:])
 	if errors.Is(e, config.ErrHelp) {
-		fmt.Println("Personal access: oauth2-sidecar device --help | oauth2-sidecar validate --help")
+		fmt.Println("Personal access: oauth2-sidecar --config workstation.yaml | oauth2-sidecar validate --help")
 		return
 	}
 	if e != nil {
@@ -57,10 +53,16 @@ func main() {
 		fmt.Println(version)
 		return
 	}
-	runProxy(c, action, false)
+	if strings.EqualFold(c.TokenHeader, validator.Header) {
+		if err := configureWorkstation(&c); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(2)
+		}
+	}
+	runProxy(c, action)
 }
 
-func runProxy(c config.Config, action config.Action, local bool) {
+func runProxy(c config.Config, action config.Action) {
 	var e error
 	opts := &slog.HandlerOptions{Level: slog.LevelInfo}
 	if c.Verbose {
@@ -110,14 +112,11 @@ func runProxy(c config.Config, action config.Action, local bool) {
 		panic(e)
 	}
 	log.Info("listening", "address", ln.Addr().String(), "upstream", c.Upstream)
-	if host, _, _ := net.SplitHostPort(ln.Addr().String()); host != "127.0.0.1" && host != "::1" {
-		log.Warn("non-loopback listen address", "address", ln.Addr().String())
+	addr := ln.Addr().(*net.TCPAddr)
+	if !addr.IP.IsLoopback() {
+		log.Warn("non-loopback listen address", "address", addr)
 	}
-	var handler http.Handler = pr
-	if local {
-		handler = deviceHandler(pr)
-	}
-	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
+	srv := &http.Server{Handler: pr.HandlerForListener(addr), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	if err := serve(ctx, srv, ln); err != nil {

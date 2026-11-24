@@ -3,51 +3,66 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/TelkomIndonesia/oauth2-sidecar/internal/config"
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/proxy"
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/token"
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/validator"
 	"golang.org/x/oauth2"
 )
 
-func TestDeviceSetup(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "user", "device.json")
-	if err := setupDevice(path, strings.NewReader("https://gitlab.example\napp\nhttps://forwarder.example\n"), io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	saved, err := os.ReadFile(path)
+const workstationConfig = "../../examples/workstation.yaml"
+
+func TestWorkstationProfile(t *testing.T) {
+	c, _, err := config.Parse([]string{"--config", workstationConfig})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var p deviceProfile
-	if err = json.Unmarshal(saved, &p); err != nil {
+	if err := configureWorkstation(&c); err != nil {
 		t.Fatal(err)
 	}
-	c, err := p.config()
-	if err != nil || c.TokenHeader != validator.Header || c.Upstream != "https://forwarder.example" || c.Listen != deviceListen || c.TokenStore == "" {
-		t.Fatal("invalid saved profile", err)
+	if c.TokenHeader != validator.Header || c.Scope != "openid email" || c.TokenStore == "" || c.RedirectPort != "8250" || c.Listen != "127.0.0.1:18080" || c.Device {
+		t.Fatal("invalid workstation settings")
 	}
-	if err := setupDevice(path, strings.NewReader("https://gitlab.example\napp\nhttp://other.example\n"), io.Discard); err == nil {
-		t.Fatal("accepted plaintext validator")
+	for _, args := range [][]string{
+		{"--upstream", "http://other.example"}, {"--upstream", "https://user@other.example"},
+		{"--listen", "0.0.0.0:18080"}, {"--insecure-skip-verify"}, {"--host-route", "alias=https://other.example"},
+	} {
+		cfg, _, err := config.Parse(append([]string{"--config", workstationConfig}, args...))
+		if err == nil && configureWorkstation(&cfg) == nil {
+			t.Errorf("accepted unsafe workstation setting %v", args)
+		}
 	}
-	after, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(after, saved) {
-		t.Fatal("failed setup damaged the previous profile")
+	other, _, err := config.Parse([]string{"--config", workstationConfig, "--upstream", "https://other.example", "--logout"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := configureWorkstation(&other); err != nil || other.TokenStore == c.TokenStore {
+		t.Fatal("validator profiles share a token store", err)
 	}
 }
 
-func TestPersonalDeviceThroughValidator(t *testing.T) {
+func TestValidateRequiresAllowUsers(t *testing.T) {
+	for _, args := range [][]string{nil, {"--allow-users", "   "}} {
+		if err := validate(args); err == nil || !strings.Contains(err.Error(), "--allow-users") {
+			t.Fatalf("missing allowlist diagnostic: %v", err)
+		}
+	}
+}
+
+func TestWorkstationThroughValidator(t *testing.T) {
 	// The token manager, proxy, validator and application use their real HTTP entry points.
 	var lookups atomic.Int32
 	gitlab := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -103,6 +118,8 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 		if err != nil || string(body) != "payload" {
 			t.Error("request body changed")
 		}
+		w.Header().Set("X-Seen-User", strings.Join(r.Header.Values("X-Forwarded-User"), ","))
+		w.Header().Set("X-Seen-ID", strings.Join(r.Header.Values("X-Request-ID"), ","))
 		w.Header().Set("X-Request-ID", "backend-id")
 		w.WriteHeader(201)
 	}))
@@ -114,6 +131,7 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 	}
 	server := httptest.NewTLSServer(gateway)
 	defer server.Close()
+	seenIDs := map[string]bool{}
 	for _, tc := range []struct {
 		token       string
 		status      int
@@ -128,9 +146,11 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 		t.Run(tc.token, func(t *testing.T) {
 			records.Reset()
 			before := lookups.Load()
-			profile := deviceProfile{Issuer: gitlab.URL, ClientID: "app", Validator: server.URL}
-			c, err := profile.config()
+			c, _, err := config.Parse([]string{"--config", workstationConfig, "--issuer", gitlab.URL, "--upstream", server.URL})
 			if err != nil {
+				t.Fatal(err)
+			}
+			if err := configureWorkstation(&c); err != nil {
 				t.Fatal(err)
 			}
 			store := token.NewFileStore(filepath.Join(t.TempDir(), "token.json"), c.Issuer, c.ClientID, c.Scope)
@@ -142,10 +162,13 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			r := httptest.NewRequest("POST", "http://"+deviceListen+"/rpc?q=1", strings.NewReader("payload"))
+			r := httptest.NewRequest("POST", "http://"+c.Listen+"/rpc?q=1", strings.NewReader("payload"))
 			r.Header.Set("Authorization", "Bearer app-credential")
+			r.Header.Add("X-Forwarded-User", "untrusted")
+			r.Header.Add("X-Forwarded-User", "another")
+			r.Header.Set("X-Request-ID", "untrusted")
 			w := httptest.NewRecorder()
-			deviceHandler(local).ServeHTTP(w, r)
+			local.HandlerForListener(&net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 18080}).ServeHTTP(w, r)
 			if w.Code != tc.status {
 				t.Fatalf("status %d, want %d", w.Code, tc.status)
 			}
@@ -159,11 +182,22 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 				return
 			}
 			var record map[string]any
-			if err := json.Unmarshal(records.Bytes(), &record); err != nil {
+			decoder := json.NewDecoder(bytes.NewReader(records.Bytes()))
+			if err := decoder.Decode(&record); err != nil {
 				t.Fatal(err)
 			}
 			if record["oidc_sub"] != tc.sub || record["oidc_issuer"] != gitlab.URL || w.Header().Get("X-Request-ID") != "backend-id" {
 				t.Fatal("wrong identity or response headers")
+			}
+			requestID, _ := record["request_id"].(string)
+			raw, err := hex.DecodeString(requestID)
+			if err != nil || len(raw) != 16 || seenIDs[requestID] || w.Header().Get("X-Seen-ID") != requestID || w.Header().Get("X-Seen-User") != tc.sub {
+				t.Fatal("forwarded request ID or user did not match the audit event")
+			}
+			seenIDs[requestID] = true
+			var correlation map[string]any
+			if err := decoder.Decode(&correlation); err != nil || correlation["request_id"] != requestID || correlation["backend_request_id"] != "backend-id" {
+				t.Fatal("backend response ID missing from audit trail", err)
 			}
 			if record["method"] != "POST" || record["path"] != "/rpc" || strings.Contains(records.String(), "q=1") {
 				t.Error("audit event must include the incoming method and path and omit the query")
@@ -183,20 +217,6 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 		gateway.ServeHTTP(w, r)
 		if w.Code != 401 {
 			t.Fatalf("ambiguous or missing credential: %d", w.Code)
-		}
-	}
-}
-
-func TestDeviceAcceptsLocalCLIOnly(t *testing.T) {
-	h := deviceHandler(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("unexpected forward") }))
-	for _, r := range []*http.Request{httptest.NewRequest("GET", "http://other.example/", nil), httptest.NewRequest("GET", "http://"+deviceListen+"/", nil)} {
-		if r.Host == deviceListen {
-			r.Header.Set("Origin", "https://example.test")
-		}
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		if w.Code != 403 {
-			t.Fatal(w.Code)
 		}
 	}
 }
