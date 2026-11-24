@@ -47,7 +47,7 @@ func (s fileStore) Load(_ context.Context) (*oauth2.Token, error) {
 	}
 	var entry cacheEntry
 	if e := json.Unmarshal(b, &entry); e != nil {
-		return nil, e
+		return nil, ErrNotFound
 	}
 	if entry.Profile != s.profile || entry.Token == nil {
 		return nil, ErrNotFound
@@ -198,7 +198,7 @@ func (m *Manager) acquire(ctx context.Context, old *oauth2.Token, forceLogin boo
 			}
 			var rejected *oauth2.RetrieveError
 			if !errors.As(err, &rejected) || rejected.ErrorCode != "invalid_grant" {
-				return nil, err
+				return nil, fmt.Errorf("token refresh failed: %w (if this persists, restart with --login to authenticate again)", err)
 			}
 		}
 	}
