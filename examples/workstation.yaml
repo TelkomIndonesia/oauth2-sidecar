@@ -1,0 +1,7 @@
+issuer: https://gitlab.example.com
+client-id: my-public-app-id
+upstream: https://validator.example.com
+scope: openid email
+redirect-port: 8250
+listen: 127.0.0.1:18080
+token-header: X-Sidecar-Authorization

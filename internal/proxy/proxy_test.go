@@ -310,3 +310,36 @@ func TestPinnedRouteDoesNotChangeDefaultDial(t *testing.T) {
 		}
 	}
 }
+
+func TestLoopbackListenerGuard(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(204) }))
+	defer upstream.Close()
+	p, err := New(upstream.URL, testToken("fixture"), slog.Default(), route(t, upstream.URL, ""), false, "Authorization")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		listen, host, header string
+		status               int
+	}{
+		{"127.0.0.1", "localhost:8080", "", 204}, {"::1", "[::1]:8080", "", 204},
+		{"127.0.0.2", "127.0.0.2:9000", "", 204}, {"127.0.0.1", "app.local", "", 204},
+		{"127.0.0.1", "unknown.example", "", 403}, {"127.0.0.1", "localhost:8080", "Origin", 403},
+		{"::1", "[::1]:8080", "Sec-Fetch-Mode", 403}, {"127.0.0.1", "app.local", "Sec-Fetch-Site", 403},
+		{"0.0.0.0", "api.example", "Origin", 204},
+	} {
+		t.Run(tc.listen+"/"+tc.host+"/"+tc.header, func(t *testing.T) {
+			h := p.HandlerForListener(&net.TCPAddr{IP: net.ParseIP(tc.listen), Port: 8080})
+			r := httptest.NewRequest("GET", "/", nil)
+			r.Host = tc.host
+			if tc.header != "" {
+				r.Header.Set(tc.header, "")
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.status {
+				t.Fatalf("status %d, want %d", w.Code, tc.status)
+			}
+		})
+	}
+}

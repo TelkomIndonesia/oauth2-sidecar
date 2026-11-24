@@ -16,6 +16,49 @@ oauth2-sidecar \
 
 On Windows, install from PowerShell with `irm https://raw.githubusercontent.com/TelkomIndonesia/oauth2-sidecar/main/install.ps1 | iex`; it puts `oauth2-sidecar.exe` in `%LOCALAPPDATA%\Programs\oauth2-sidecar` and adds that folder to the user `Path`. The first run opens a browser and also logs the login URL, so it can be opened by hand where no browser starts (for example WSL without `wslu`, or over SSH). The client can then call `http://127.0.0.1:8080/v1/foo`; the sidecar forwards it to the upstream with `Authorization: Bearer <access_token>`. The default listener is loopback. Register `http://127.0.0.1:<port>/callback` with the provider, or use `--redirect-port` for a stable callback port.
 
+## Personal access through a validator
+
+Each developer runs the proxy with a personal workstation config. The `validate` command runs behind the HTTPS route in OpenShift. Each request carries the developer's OAuth access token to the validator. The backend receives its original application credentials and payload.
+
+**Server.** Register a dedicated public GitLab OAuth application with the `openid` and `email` scopes and the redirect URI `http://127.0.0.1:8250/callback`. Run the validator with that application's ID, the GitLab user IDs allowed to access this backend, and a fixed backend URL:
+
+```sh
+oauth2-sidecar validate --issuer https://gitlab.example.com \
+  --client-id my-public-app-id --allow-users 17,24 \
+  --upstream http://my-api:8080 --listen :8080
+```
+
+Target the validator with the HTTPS route and restrict direct access to the backend according to your cluster policy. An alternative route directly to the application remains outside this check. A [Containerfile](deploy/validator.Containerfile) builds the binary for an OpenShift deployment. The runtime needs the GitLab HTTPS CA and outbound access to GitLab.
+
+The validator checks the OAuth application ID, `openid` scope, allowed user ID, and matching subject using GitLab's `/oauth/token/info` and `/oauth/userinfo`. Each validator instance caches successful checks by token hash for up to 30 seconds, capped by the token's remaining lifetime. Revocation can take up to that long to take effect. Tokens with no reported expiry are checked on every request. When a fresh check is required and GitLab is unavailable, the request fails before forwarding. [GitLab token information](https://docs.gitlab.com/api/oauth2/#retrieve-the-token-information) · [GitLab OIDC claims](https://docs.gitlab.com/integration/openid_connect_provider/#shared-information)
+
+Every authorized request gets a new `request_id`. The audit event also includes the incoming HTTP `method`, `path` (query omitted), `oidc_issuer`, `oidc_sub`, and `gitlab_email` when GitLab verifies the email. The validator strips the personal token and overwrites the upstream `X-Forwarded-User` and `X-Request-ID` with the verified numeric GitLab subject and the generated ID. If the backend returns a different `X-Request-ID`, the validator passes the response header through and logs both IDs together. Only trust the forwarded identity on a backend reachable exclusively through the validator or another trusted proxy.
+
+On each validator replica, a TCP peer gets ten failed or concurrent uncached checks per one-minute window. A successful check frees its slot. When the budget is exhausted, the validator returns HTTP 429 with `Retry-After` before contacting GitLab. Valid cache hits continue. By default the limiter uses the socket peer IP. Behind OpenShift, set `--trusted-proxy-cidrs` to the actual router addresses only if those routers append or replace `X-Forwarded-For`. The validator walks the trusted hops from right to left and uses the first untrusted IP. Clients behind the same visible VPN or NAT address share a budget. For a VPN-only route, restrict source CIDRs at the ingress where client addresses are visible. [OpenShift route allowlists](https://docs.redhat.com/en/documentation/openshift_container_platform/4.15/html/networking/configuring-routes)
+
+**Developer computer.** Use the curl installer from Quick start on Linux or macOS. On Windows, run the installer from PowerShell:
+
+```powershell
+$installer = curl.exe -fsSL https://raw.githubusercontent.com/TelkomIndonesia/oauth2-sidecar/main/install.ps1
+if ($LASTEXITCODE -eq 0) { & ([scriptblock]::Create(($installer -join [Environment]::NewLine))) }
+```
+
+Use a release that includes personal access, or build the CLI locally from this revision. Save the [workstation YAML](examples/workstation.yaml) locally. Set `issuer`, `client-id`, and `upstream` to the GitLab issuer, public OAuth application ID, and HTTPS validator URL supplied by your administrator.
+
+```sh
+oauth2-sidecar --config workstation.yaml
+```
+
+Complete personal sign-in in the browser. The proxy listens on `127.0.0.1:18080`. Curl needs only the original application headers and payload.
+
+```sh
+curl -H 'Content-Type: application/json' -d '{"operation":"example"}' http://127.0.0.1:18080/rpc
+```
+
+With the personal token header, the default token file is scoped to the OS user, issuer, application, scopes, and validator URL. The client reuses valid tokens and refreshes expired ones. Use `--config workstation.yaml --login` to sign in again, or stop the proxy and use `--config workstation.yaml --logout` to remove the token. To migrate from the PR preview’s `device.json`, copy its issuer and client ID into the YAML and use its `validator` URL as `upstream`. Matching settings reuse the existing token file.
+
+Loopback proxy listeners accept the bound IP, `localhost`, and explicit host-route names. They reject requests carrying browser Origin or Fetch Metadata headers. Local programs with access to the listener can use the active session.
+
 ## Host routes
 
 Use the repeatable `--host-route local-host=scheme://remote-host[/path][=remote-ip]` option to send requests for a specific local hostname to a different origin and base path:

@@ -99,6 +99,27 @@ func normalizeHost(h string) string {
 	return h
 }
 
+// HandlerForListener restricts a loopback proxy to local CLI hosts and explicit host routes.
+func (p *Proxy) HandlerForListener(addr *net.TCPAddr) http.Handler {
+	if !addr.IP.IsLoopback() {
+		return p
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := normalizeHost(r.Host)
+		if host != "localhost" && !addr.IP.Equal(net.ParseIP(strings.Trim(host, "[]"))) && p.routes[host] == nil {
+			http.Error(w, "unexpected local proxy host", http.StatusForbidden)
+			return
+		}
+		for key := range r.Header {
+			if strings.EqualFold(key, "Origin") || strings.HasPrefix(strings.ToLower(key), "sec-fetch-") {
+				http.Error(w, "local command-line requests only", http.StatusForbidden)
+				return
+			}
+		}
+		p.ServeHTTP(w, r)
+	})
+}
+
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	host := normalizeHost(req.Host)
 	rp := p.routes[host]
