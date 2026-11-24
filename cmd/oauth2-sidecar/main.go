@@ -120,13 +120,20 @@ func runProxy(c config.Config, action config.Action, local bool) {
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		q, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := serve(ctx, srv, ln); err != nil {
+		panic(err)
+	}
+}
+
+func serve(ctx context.Context, srv *http.Server, ln net.Listener) error {
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve(ln) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		drain, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		srv.Shutdown(q)
-	}()
-	if e = srv.Serve(ln); e != nil && !errors.Is(e, http.ErrServerClosed) {
-		panic(e)
+		return srv.Shutdown(drain)
 	}
 }

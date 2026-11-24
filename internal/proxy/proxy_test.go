@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -217,7 +218,7 @@ func TestProxyInsecurePreservesClonedTLSConfig(t *testing.T) {
 	http.DefaultTransport = clone
 	t.Cleanup(func() { http.DefaultTransport = original; clone.CloseIdleConnections() })
 
-	p, e := New("", testToken("new"), slog.Default(), nil, true, "Authorization")
+	p, e := New("https://example.test", testToken("new"), slog.Default(), nil, true, "Authorization")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -279,5 +280,33 @@ func TestProxyTokenHeaderKeepsAuthorization(t *testing.T) {
 	x := <-got
 	if x.Header.Get("Authorization") != "Bearer app" || x.Header.Get("X-Dex-Token") != "Bearer new" {
 		t.Fatalf("Authorization=%q X-Dex-Token=%q", x.Header.Get("Authorization"), x.Header.Get("X-Dex-Token"))
+	}
+}
+
+func TestPinnedRouteDoesNotChangeDefaultDial(t *testing.T) {
+	// Record dial addresses without relying on external DNS or network access.
+	original := http.DefaultTransport
+	base := original.(*http.Transport).Clone()
+	base.Proxy = nil
+	var address string
+	base.DialContext = func(_ context.Context, _, addr string) (net.Conn, error) {
+		address = addr
+		return nil, errors.New("recorded dial")
+	}
+	http.DefaultTransport = base
+	t.Cleanup(func() { http.DefaultTransport = original })
+	const upstream = "https://api.example"
+	routes := route(t, upstream, "192.0.2.1")
+	routes["second.local"] = config.HostRoute{Target: routes["app.local"].Target, IP: "192.0.2.2"}
+	p, err := New(upstream, testToken("new"), slog.Default(), routes, false, "Authorization")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for host, want := range map[string]string{"app.local": "192.0.2.1:443", "second.local": "192.0.2.2:443", "other.local": "api.example:443"} {
+		address = ""
+		p.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "http://"+host+"/", nil))
+		if address != want {
+			t.Errorf("%s dialed %s, want %s", host, address, want)
+		}
 	}
 }
