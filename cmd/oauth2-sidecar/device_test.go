@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/TelkomIndonesia/oauth2-sidecar/internal/proxy"
@@ -48,7 +49,9 @@ func TestDeviceSetup(t *testing.T) {
 
 func TestPersonalDeviceThroughValidator(t *testing.T) {
 	// The token manager, proxy, validator and application use their real HTTP entry points.
+	var lookups atomic.Int32
 	gitlab := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		lookups.Add(1)
 		key := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		sub := 17
 		if key == "device-b" {
@@ -112,16 +115,19 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 	server := httptest.NewTLSServer(gateway)
 	defer server.Close()
 	for _, tc := range []struct {
-		token      string
-		status     int
-		sub, email string
+		token       string
+		status      int
+		sub, email  string
+		wantLookups int32
 	}{
-		{"device-a", 201, "17", "user17@example.test"}, {"device-b", 201, "24", ""},
-		{"revoked", 401, "", ""}, {"expired", 401, "", ""}, {"wrong-app", 403, "", ""}, {"other-user", 403, "", ""},
-		{"unavailable", 502, "", ""}, {"redirect", 502, "", ""}, {"mismatch", 401, "", ""},
+		{"device-a", 201, "17", "user17@example.test", 2}, {"device-b", 201, "24", "", 2},
+		{"device-a", 201, "17", "user17@example.test", 0},
+		{"revoked", 401, "", "", 1}, {"expired", 401, "", "", 1}, {"wrong-app", 403, "", "", 1}, {"other-user", 403, "", "", 1},
+		{"unavailable", 502, "", "", 1}, {"redirect", 502, "", "", 1}, {"mismatch", 401, "", "", 2},
 	} {
 		t.Run(tc.token, func(t *testing.T) {
 			records.Reset()
+			before := lookups.Load()
 			profile := deviceProfile{Issuer: gitlab.URL, ClientID: "app", Validator: server.URL}
 			c, err := profile.config()
 			if err != nil {
@@ -143,6 +149,9 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 			if w.Code != tc.status {
 				t.Fatalf("status %d, want %d", w.Code, tc.status)
 			}
+			if calls := lookups.Load() - before; calls != tc.wantLookups {
+				t.Errorf("GitLab calls for this request = %d, want %d", calls, tc.wantLookups)
+			}
 			if tc.status != 201 {
 				if records.Len() != 0 {
 					t.Fatal("rejected request logged as authorized")
@@ -155,6 +164,9 @@ func TestPersonalDeviceThroughValidator(t *testing.T) {
 			}
 			if record["oidc_sub"] != tc.sub || record["oidc_issuer"] != gitlab.URL || w.Header().Get("X-Request-ID") != "backend-id" {
 				t.Fatal("wrong identity or response headers")
+			}
+			if record["method"] != "POST" || record["path"] != "/rpc" || strings.Contains(records.String(), "q=1") {
+				t.Error("audit event must include the incoming method and path and omit the query")
 			}
 			email, _ := record["gitlab_email"].(string)
 			if email != tc.email || strings.Contains(records.String(), tc.token) {

@@ -3,6 +3,7 @@ package validator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,10 +15,34 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 const Header = "X-Sidecar-Authorization"
+
+const (
+	validationTTL   = 30 * time.Second
+	maxCachedTokens = 1024
+)
+
+type identity struct {
+	sub, email string
+	validUntil time.Time
+}
+
+type handler struct {
+	issuer, clientID string
+	users            map[string]bool
+	infoURL, userURL *url.URL
+	client           *http.Client
+	proxy            http.Handler
+	log              *slog.Logger
+	now              func() time.Time
+
+	mu    sync.Mutex
+	cache map[[sha256.Size]byte]identity
+}
 
 // New constructs a forwarder for one backend. Application Authorization headers pass through.
 func New(issuer, clientID, upstream string, allowed []string, log *slog.Logger) (http.Handler, error) {
@@ -47,57 +72,107 @@ func New(issuer, clientID, upstream string, allowed []string, log *slog.Logger) 
 		p.Out.Header.Del(Header)
 		p.Out.Trailer.Del(Header)
 	}}
-	infoURL := idp.JoinPath("oauth/token/info")
-	userURL := idp.JoinPath("oauth/userinfo")
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		bearer := requestToken(r)
-		if bearer == "" {
-			http.Error(w, "personal OAuth access token required", http.StatusUnauthorized)
+	return &handler{
+		issuer: issuer, clientID: clientID, users: users,
+		infoURL: idp.JoinPath("oauth/token/info"), userURL: idp.JoinPath("oauth/userinfo"),
+		client: client, proxy: proxy, log: log, now: time.Now,
+		cache: make(map[[sha256.Size]byte]identity),
+	}, nil
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	bearer := requestToken(r)
+	if bearer == "" {
+		http.Error(w, "personal OAuth access token required", http.StatusUnauthorized)
+		return
+	}
+	key := sha256.Sum256([]byte(bearer))
+	started := h.now()
+	h.mu.Lock()
+	id, ok := h.cache[key]
+	h.mu.Unlock()
+	if !ok || !started.Before(id.validUntil) {
+		id, ok = h.verify(w, r, bearer, started)
+		if !ok {
 			return
 		}
-		var info struct {
-			UserID      int64    `json:"resource_owner_id"`
-			Scope       []string `json:"scope"`
-			ExpiresIn   *int64   `json:"expires_in"`
-			Application struct {
-				UID string `json:"uid"`
-			} `json:"application"`
+		if !id.validUntil.IsZero() {
+			h.remember(key, id)
 		}
-		status := lookup(r.Context(), client, infoURL, bearer, &info)
-		if status != http.StatusOK {
-			http.Error(w, http.StatusText(status), status)
-			return
-		}
-		if info.UserID <= 0 || (info.ExpiresIn != nil && *info.ExpiresIn <= 0) {
+	}
+	attrs := []slog.Attr{slog.String("oidc_issuer", h.issuer), slog.String("oidc_sub", id.sub), slog.String("method", r.Method), slog.String("path", r.URL.Path)}
+	if id.email != "" {
+		attrs = append(attrs, slog.String("gitlab_email", id.email))
+	}
+	h.log.LogAttrs(r.Context(), slog.LevelInfo, "authorized request", attrs...)
+	h.proxy.ServeHTTP(w, r)
+}
+
+func (h *handler) verify(w http.ResponseWriter, r *http.Request, bearer string, started time.Time) (identity, bool) {
+	var info struct {
+		UserID      int64    `json:"resource_owner_id"`
+		Scope       []string `json:"scope"`
+		ExpiresIn   *int64   `json:"expires_in"`
+		Application struct {
+			UID string `json:"uid"`
+		} `json:"application"`
+	}
+	status := lookup(r.Context(), h.client, h.infoURL, bearer, &info)
+	if status != http.StatusOK {
+		http.Error(w, http.StatusText(status), status)
+		return identity{}, false
+	}
+	if info.UserID <= 0 || (info.ExpiresIn != nil && *info.ExpiresIn <= 0) {
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+		return identity{}, false
+	}
+	sub := strconv.FormatInt(info.UserID, 10)
+	if info.Application.UID != h.clientID || !slices.Contains(info.Scope, "openid") || !h.users[sub] {
+		http.Error(w, "access denied", http.StatusForbidden)
+		return identity{}, false
+	}
+	var user struct {
+		Subject  string `json:"sub"`
+		Email    string `json:"email"`
+		Verified bool   `json:"email_verified"`
+	}
+	status = lookup(r.Context(), h.client, h.userURL, bearer, &user)
+	if status != http.StatusOK {
+		http.Error(w, http.StatusText(status), status)
+		return identity{}, false
+	}
+	if user.Subject != sub {
+		http.Error(w, "inconsistent token identity", http.StatusUnauthorized)
+		return identity{}, false
+	}
+	id := identity{sub: sub}
+	if user.Verified {
+		id.email = user.Email
+	}
+	if info.ExpiresIn != nil {
+		// Start the lifetime before introspection so network time counts against it.
+		remaining := *info.ExpiresIn
+		if int64(h.now().Sub(started)/time.Second) >= remaining {
 			http.Error(w, "invalid token", http.StatusUnauthorized)
-			return
+			return identity{}, false
 		}
-		sub := strconv.FormatInt(info.UserID, 10)
-		if info.Application.UID != clientID || !slices.Contains(info.Scope, "openid") || !users[sub] {
-			http.Error(w, "access denied", http.StatusForbidden)
-			return
+		seconds := min(remaining, int64(validationTTL/time.Second))
+		id.validUntil = started.Add(time.Duration(seconds) * time.Second)
+	}
+	return id, true
+}
+
+func (h *handler) remember(key [sha256.Size]byte, id identity) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, present := h.cache[key]; !present && len(h.cache) >= maxCachedTokens {
+		// Any entry can be evicted safely. Its next request will revalidate with GitLab.
+		for evict := range h.cache {
+			delete(h.cache, evict)
+			break
 		}
-		var user struct {
-			Subject  string `json:"sub"`
-			Email    string `json:"email"`
-			Verified bool   `json:"email_verified"`
-		}
-		status = lookup(r.Context(), client, userURL, bearer, &user)
-		if status != http.StatusOK {
-			http.Error(w, http.StatusText(status), status)
-			return
-		}
-		if user.Subject != sub {
-			http.Error(w, "inconsistent token identity", http.StatusUnauthorized)
-			return
-		}
-		attrs := []slog.Attr{slog.String("oidc_issuer", issuer), slog.String("oidc_sub", sub), slog.String("method", r.Method)}
-		if user.Verified && user.Email != "" {
-			attrs = append(attrs, slog.String("gitlab_email", user.Email))
-		}
-		log.LogAttrs(r.Context(), slog.LevelInfo, "authorized request", attrs...)
-		proxy.ServeHTTP(w, r)
-	}), nil
+	}
+	h.cache[key] = id
 }
 
 func requestToken(r *http.Request) string {

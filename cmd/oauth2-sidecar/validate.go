@@ -40,15 +40,6 @@ func validate(args []string) error {
 	srv := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 90 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	done := make(chan error, 1)
-	go func() { done <- srv.Serve(ln) }()
 	slog.Info("validator listening", "address", ln.Addr().String())
-	select {
-	case err := <-done:
-		return err
-	case <-ctx.Done():
-		drain, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return srv.Shutdown(drain)
-	}
+	return serve(ctx, srv, ln)
 }
