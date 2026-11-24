@@ -15,8 +15,8 @@ case "$arch" in x86_64|amd64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo
 if [ "$version" = latest ]; then
   version=$(curl --retry 3 -fsSL "https://api.github.com/repos/$repo/releases/latest" | awk -F'"' '/tag_name/{print $4; exit}')
 fi
-case "$version" in v*) ;; *) version="v$version" ;; esac
 [ -n "$version" ] || { echo "could not determine release version" >&2; exit 1; }
+case "$version" in v*) ;; *) version="v$version" ;; esac
 version_no_v=$(printf '%s' "$version" | sed 's/^v//')
 asset="oauth2-sidecar_${version_no_v}_${os}_${arch}.tar.gz"
 base="https://github.com/$repo/releases/download/$version"
@@ -24,14 +24,18 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 curl --retry 3 -fsSL "$base/$asset" -o "$tmp/$asset"
 curl --retry 3 -fsSL "$base/checksums.txt" -o "$tmp/checksums.txt"
+expected=$(awk -v f="$asset" '$2 == f {print $1}' "$tmp/checksums.txt")
 if command -v sha256sum >/dev/null 2>&1; then
-  (cd "$tmp" && grep "  $asset\$" checksums.txt | sha256sum -c -)
+  actual=$(sha256sum "$tmp/$asset" | awk '{print $1}')
 elif command -v shasum >/dev/null 2>&1; then
-  expected=$(awk -v f="$asset" '$2 == f {print $1}' "$tmp/checksums.txt")
   actual=$(shasum -a 256 "$tmp/$asset" | awk '{print $1}')
-  [ -n "$expected" ] && [ "$expected" = "$actual" ]
 else
   echo "sha256sum or shasum is required for checksum verification" >&2
+  exit 1
+fi
+
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+  echo "checksum missing or incorrect for $asset" >&2
   exit 1
 fi
 

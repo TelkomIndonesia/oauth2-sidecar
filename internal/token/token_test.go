@@ -3,9 +3,12 @@ package token
 import (
 	"context"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/oauth2"
 )
@@ -114,5 +117,92 @@ func TestIndependentSessionUpdates(t *testing.T) {
 	first := path("client", "openid profile", "localhost:8001")
 	if first == path("other", "openid profile", "localhost:8001") || first != path("client", "profile openid", "localhost:8001") {
 		t.Fatal("unstable profile key")
+	}
+}
+
+type testAuth struct {
+	refreshErr               error
+	loginCount, refreshCount int
+}
+
+func (a *testAuth) Login(context.Context) (*oauth2.Token, error) {
+	a.loginCount++
+	return &oauth2.Token{AccessToken: "login"}, nil
+}
+func (a *testAuth) Refresh(context.Context, *oauth2.Token) (*oauth2.Token, error) {
+	a.refreshCount++
+	return &oauth2.Token{AccessToken: "refreshed"}, a.refreshErr
+}
+
+func TestAcquire(t *testing.T) {
+	t.Run("cache read error", func(t *testing.T) {
+		store := NewFileStore(t.TempDir(), "issuer", "client", "openid")
+		auth := &testAuth{}
+		_, err := NewManager(store, auth).Acquire(context.Background(), false)
+		var pathErr *os.PathError
+		if !errors.As(err, &pathErr) || auth.loginCount != 0 || auth.refreshCount != 0 {
+			t.Fatalf("expected cache I/O error before authentication, got %v (logins %d, refreshes %d)", err, auth.loginCount, auth.refreshCount)
+		}
+	})
+	transient := errors.New("issuer unavailable")
+	for _, tc := range []struct {
+		name, cache       string
+		force             bool
+		refreshErr        error
+		want              string
+		logins, refreshes int
+	}{
+		{"cached", "valid", false, nil, "saved", 0, 0},
+		{"force", "valid", true, nil, "login", 1, 0},
+		{"corrupt", "corrupt", false, nil, "login", 1, 0},
+		{"expired", "expired", false, nil, "refreshed", 0, 1},
+		{"temporary failure", "expired", false, transient, "", 0, 1},
+		{"invalid client", "expired", false, &oauth2.RetrieveError{ErrorCode: "invalid_client"}, "", 0, 1},
+		{"non-JSON rejection", "expired", false, &oauth2.RetrieveError{Response: &http.Response{StatusCode: 403, Status: "403 Forbidden"}, Body: []byte("Forbidden")}, "", 0, 1},
+		{"revoked", "expired", false, &oauth2.RetrieveError{ErrorCode: "invalid_grant"}, "login", 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "token.json")
+			s := NewFileStore(path, "issuer", "client", "openid")
+			if tc.cache == "corrupt" {
+				if err := os.WriteFile(path, []byte("{"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				old := &oauth2.Token{AccessToken: "saved", RefreshToken: "refresh"}
+				if tc.cache == "expired" {
+					old.Expiry = time.Now().Add(-time.Hour)
+				}
+				if err := s.Save(ctx, old); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a := &testAuth{refreshErr: tc.refreshErr}
+			got, err := NewManager(s, a).Acquire(ctx, tc.force)
+			if tc.want == "" {
+				if !errors.Is(err, tc.refreshErr) {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if !strings.Contains(err.Error(), "--login") {
+					t.Fatalf("refresh error missing recovery hint: %v", err)
+				}
+			} else if err != nil || got.AccessToken != tc.want {
+				t.Fatalf("token %v, error %v", got, err)
+			}
+			saved, err := s.Load(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.want != "" && saved.AccessToken != tc.want || tc.want == "" && saved.AccessToken != "saved" {
+				t.Fatalf("unexpected persisted access token %q", saved.AccessToken)
+			}
+			if tc.want == "refreshed" && saved.RefreshToken != "refresh" {
+				t.Fatal("refresh token lost")
+			}
+			if a.loginCount != tc.logins || a.refreshCount != tc.refreshes {
+				t.Fatalf("logins %d, refreshes %d", a.loginCount, a.refreshCount)
+			}
+		})
 	}
 }

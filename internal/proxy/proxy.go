@@ -18,29 +18,9 @@ type TokenSource interface {
 	AccessToken(context.Context) (string, error)
 }
 type Proxy struct {
-	rp  *httputil.ReverseProxy
-	r   *resolver
-	log *slog.Logger
-}
-
-type resolver struct {
-	upstream    *url.URL
-	upstreamSet bool
-	routes      map[string]config.HostRoute
-}
-
-func newResolver(upstream *url.URL, routes map[string]config.HostRoute) *resolver {
-	return &resolver{upstream: upstream, upstreamSet: upstream != nil, routes: routes}
-}
-
-func (r *resolver) resolve(host string) (*url.URL, string, bool) {
-	if rt, ok := r.routes[host]; ok {
-		return rt.Target, "host-route", true
-	}
-	if r.upstreamSet {
-		return r.upstream, "upstream", true
-	}
-	return nil, "", false
+	rp     *httputil.ReverseProxy
+	routes map[string]*httputil.ReverseProxy
+	log    *slog.Logger
 }
 
 func New(raw string, src TokenSource, log *slog.Logger, routes map[string]config.HostRoute, insecure bool, header string) (*Proxy, error) {
@@ -63,60 +43,46 @@ func New(raw string, src TokenSource, log *slog.Logger, routes map[string]config
 		transport.TLSClientConfig.InsecureSkipVerify = true
 		base = transport
 	}
-	if overrides := dialOverrides(routes); len(overrides) > 0 {
-		transport := base.(*http.Transport).Clone()
-		applyDialOverrides(transport, overrides)
-		base = transport
-	}
-	r := newResolver(upstream, routes)
-	rp := &httputil.ReverseProxy{Transport: transport{src: src, base: base, log: log, header: header}, ErrorHandler: func(w http.ResponseWriter, _ *http.Request, e error) {
-		log.Error("proxy request", "error", e)
-		http.Error(w, "upstream request failed", 502)
-	}}
-	rp.Rewrite = func(pr *httputil.ProxyRequest) {
-		host := normalizeHost(pr.In.Host)
-		target, source, _ := r.resolve(host)
-		pr.SetURL(target)
-		pr.SetXForwarded()
-		log.Debug("proxy request",
-			"method", pr.In.Method,
-			"host", host,
-			"target", pr.Out.URL.String(),
-			"source", source,
-		)
-	}
-	return &Proxy{rp: rp, r: r, log: log}, nil
-}
-
-func dialOverrides(routes map[string]config.HostRoute) map[string]string {
-	out := map[string]string{}
-	for _, rt := range routes {
-		if rt.IP != "" && rt.Target != nil && rt.Target.Hostname() != "" {
-			out[strings.ToLower(rt.Target.Hostname())] = rt.IP
+	makeProxy := func(target *url.URL, base http.RoundTripper, source string) *httputil.ReverseProxy {
+		return &httputil.ReverseProxy{
+			Transport: transport{src: src, base: base, log: log, header: header},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, e error) {
+				log.Error("proxy request", "error", e)
+				http.Error(w, "upstream request failed", http.StatusBadGateway)
+			},
+			Rewrite: func(pr *httputil.ProxyRequest) {
+				pr.SetURL(target)
+				pr.SetXForwarded()
+				log.Debug("proxy request", "method", pr.In.Method, "host", normalizeHost(pr.In.Host), "target", pr.Out.URL.String(), "source", source)
+			},
 		}
 	}
-	return out
+	p := &Proxy{routes: make(map[string]*httputil.ReverseProxy), log: log}
+	if upstream != nil {
+		p.rp = makeProxy(upstream, base, "upstream")
+	}
+	for host, route := range routes {
+		rt := base
+		if route.IP != "" {
+			rt = pinnedTransport(base.(*http.Transport), route.IP)
+		}
+		p.routes[host] = makeProxy(route.Target, rt, "host-route")
+	}
+	return p, nil
 }
 
-func applyDialOverrides(t *http.Transport, overrides map[string]string) {
+func pinnedTransport(base *http.Transport, ip string) *http.Transport {
+	t := base.Clone()
+	t.Proxy = nil
 	dial := t.DialContext
 	t.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, e := net.SplitHostPort(address)
+		_, port, e := net.SplitHostPort(address)
 		if e != nil {
 			return nil, e
 		}
-		if ip, ok := overrides[strings.ToLower(host)]; ok {
-			address = net.JoinHostPort(ip, port)
-		}
-		return dial(ctx, network, address)
+		return dial(ctx, network, net.JoinHostPort(ip, port))
 	}
-	proxy := t.Proxy
-	t.Proxy = func(r *http.Request) (*url.URL, error) {
-		if _, ok := overrides[strings.ToLower(r.URL.Hostname())]; ok || proxy == nil {
-			return nil, nil
-		}
-		return proxy(r)
-	}
+	return t
 }
 
 func normalizeHost(h string) string {
@@ -135,12 +101,16 @@ func normalizeHost(h string) string {
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	host := normalizeHost(req.Host)
-	if _, _, ok := p.r.resolve(host); !ok {
+	rp := p.routes[host]
+	if rp == nil {
+		rp = p.rp
+	}
+	if rp == nil {
 		p.log.Error("no target for host", "host", host)
 		http.Error(w, "no upstream destination for host", http.StatusBadGateway)
 		return
 	}
-	p.rp.ServeHTTP(w, req)
+	rp.ServeHTTP(w, req)
 }
 
 type transport struct {
